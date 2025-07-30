@@ -1,0 +1,356 @@
+{
+  "model_info": {
+    "model_name": "FusionTree-7B",
+    "num_layers": 32,
+    "hidden_size": 4096,
+    "creation_time": "2024-01-01T00:00:00Z",
+    "training_steps": 25000,
+    "gate_statistics_steps": 20000
+  },
+  
+  "pruning_config": {
+    "mamba_threshold_high": 0.8,
+    "attention_threshold_low": 0.2,
+    "confidence_threshold": 0.7,
+    "preserve_global_heads": true,
+    "min_hybrid_layers": 4
+  },
+  
+  "layer_decisions": [
+    {
+      "layer_idx": 0,
+      "decision": "hybrid",
+      "confidence": 0.85,
+      "gate_mean": 0.52,
+      "gate_std": 0.12,
+      "trend": 0.001,
+      "reasoning": "Input layer - preserve both branches for feature extraction"
+    },
+    {
+      "layer_idx": 1,
+      "decision": "attention",
+      "confidence": 0.92,
+      "gate_mean": 0.15,
+      "gate_std": 0.05,
+      "trend": -0.002,
+      "reasoning": "Strong bias toward attention, stable statistics"
+    },
+    {
+      "layer_idx": 2,
+      "decision": "attention",
+      "confidence": 0.88,
+      "gate_mean": 0.18,
+      "gate_std": 0.06,
+      "trend": -0.001,
+      "reasoning": "Consistent attention preference"
+    },
+    {
+      "layer_idx": 3,
+      "decision": "hybrid",
+      "confidence": 0.65,
+      "gate_mean": 0.45,
+      "gate_std": 0.15,
+      "trend": 0.003,
+      "reasoning": "Balanced usage, high variance suggests task-dependent switching"
+    },
+    {
+      "layer_idx": 4,
+      "decision": "hybrid",
+      "confidence": 0.70,
+      "gate_mean": 0.48,
+      "gate_std": 0.13,
+      "trend": 0.002,
+      "reasoning": "Near-balanced, preserve flexibility"
+    },
+    {
+      "layer_idx": 5,
+      "decision": "mamba",
+      "confidence": 0.85,
+      "gate_mean": 0.82,
+      "gate_std": 0.08,
+      "trend": 0.001,
+      "reasoning": "Strong mamba preference, low variance"
+    },
+    {
+      "layer_idx": 6,
+      "decision": "mamba",
+      "confidence": 0.90,
+      "gate_mean": 0.85,
+      "gate_std": 0.06,
+      "trend": 0.000,
+      "reasoning": "Very strong mamba preference, very stable"
+    },
+    {
+      "layer_idx": 7,
+      "decision": "mamba",
+      "confidence": 0.88,
+      "gate_mean": 0.83,
+      "gate_std": 0.07,
+      "trend": -0.001,
+      "reasoning": "Consistent mamba preference"
+    },
+    {
+      "layer_idx": 8,
+      "decision": "mamba",
+      "confidence": 0.91,
+      "gate_mean": 0.86,
+      "gate_std": 0.05,
+      "trend": 0.000,
+      "reasoning": "Strong mamba preference in middle layers"
+    },
+    {
+      "layer_idx": 9,
+      "decision": "mamba",
+      "confidence": 0.89,
+      "gate_mean": 0.84,
+      "gate_std": 0.06,
+      "trend": 0.001,
+      "reasoning": "Continued mamba dominance"
+    },
+    {
+      "layer_idx": 10,
+      "decision": "mamba",
+      "confidence": 0.87,
+      "gate_mean": 0.81,
+      "gate_std": 0.07,
+      "trend": 0.002,
+      "reasoning": "Long-range dependency handling"
+    },
+    {
+      "layer_idx": 11,
+      "decision": "hybrid",
+      "confidence": 0.75,
+      "gate_mean": 0.55,
+      "gate_std": 0.11,
+      "trend": 0.004,
+      "reasoning": "Transition layer - increasing attention needs"
+    },
+    {
+      "layer_idx": 12,
+      "decision": "hybrid",
+      "confidence": 0.72,
+      "gate_mean": 0.48,
+      "gate_std": 0.14,
+      "trend": 0.003,
+      "reasoning": "Balanced usage in middle-upper layers"
+    },
+    {
+      "layer_idx": 13,
+      "decision": "attention",
+      "confidence": 0.83,
+      "gate_mean": 0.22,
+      "gate_std": 0.08,
+      "trend": -0.002,
+      "reasoning": "Shift toward local attention for refinement"
+    },
+    {
+      "layer_idx": 14,
+      "decision": "attention",
+      "confidence": 0.86,
+      "gate_mean": 0.19,
+      "gate_std": 0.07,
+      "trend": -0.001,
+      "reasoning": "Strong attention preference for detail processing"
+    },
+    {
+      "layer_idx": 15,
+      "decision": "hybrid",
+      "confidence": 0.68,
+      "gate_mean": 0.42,
+      "gate_std": 0.16,
+      "trend": 0.005,
+      "reasoning": "Mid-point layer - preserve both for flexibility"
+    },
+    {
+      "layer_idx": 16,
+      "decision": "mamba",
+      "confidence": 0.84,
+      "gate_mean": 0.79,
+      "gate_std": 0.09,
+      "trend": 0.001,
+      "reasoning": "Return to long-range processing"
+    },
+    {
+      "layer_idx": 17,
+      "decision": "mamba",
+      "confidence": 0.87,
+      "gate_mean": 0.82,
+      "gate_std": 0.07,
+      "trend": 0.000,
+      "reasoning": "Strong mamba preference continues"
+    },
+    {
+      "layer_idx": 18,
+      "decision": "mamba",
+      "confidence": 0.85,
+      "gate_mean": 0.80,
+      "gate_std": 0.08,
+      "trend": 0.002,
+      "reasoning": "Stable mamba dominance"
+    },
+    {
+      "layer_idx": 19,
+      "decision": "hybrid",
+      "confidence": 0.71,
+      "gate_mean": 0.46,
+      "gate_std": 0.13,
+      "trend": 0.004,
+      "reasoning": "Transition back to balanced usage"
+    },
+    {
+      "layer_idx": 20,
+      "decision": "attention",
+      "confidence": 0.89,
+      "gate_mean": 0.17,
+      "gate_std": 0.06,
+      "trend": -0.003,
+      "reasoning": "Strong attention preference in upper layers"
+    },
+    {
+      "layer_idx": 21,
+      "decision": "attention",
+      "confidence": 0.91,
+      "gate_mean": 0.14,
+      "gate_std": 0.05,
+      "trend": -0.002,
+      "reasoning": "Very strong attention preference"
+    },
+    {
+      "layer_idx": 22,
+      "decision": "attention",
+      "confidence": 0.88,
+      "gate_mean": 0.16,
+      "gate_std": 0.06,
+      "trend": -0.001,
+      "reasoning": "Continued attention dominance"
+    },
+    {
+      "layer_idx": 23,
+      "decision": "hybrid",
+      "confidence": 0.73,
+      "gate_mean": 0.44,
+      "gate_std": 0.12,
+      "trend": 0.003,
+      "reasoning": "Strategic hybrid layer for complex reasoning"
+    },
+    {
+      "layer_idx": 24,
+      "decision": "attention",
+      "confidence": 0.85,
+      "gate_mean": 0.20,
+      "gate_std": 0.07,
+      "trend": -0.002,
+      "reasoning": "Upper layer attention for fine-grained processing"
+    },
+    {
+      "layer_idx": 25,
+      "decision": "attention",
+      "confidence": 0.87,
+      "gate_mean": 0.18,
+      "gate_std": 0.06,
+      "trend": -0.001,
+      "reasoning": "Strong attention preference near output"
+    },
+    {
+      "layer_idx": 26,
+      "decision": "hybrid",
+      "confidence": 0.76,
+      "gate_mean": 0.41,
+      "gate_std": 0.11,
+      "trend": 0.002,
+      "reasoning": "Pre-output hybrid for complex integration"
+    },
+    {
+      "layer_idx": 27,
+      "decision": "attention",
+      "confidence": 0.82,
+      "gate_mean": 0.21,
+      "gate_std": 0.08,
+      "trend": -0.003,
+      "reasoning": "Final processing with attention focus"
+    },
+    {
+      "layer_idx": 28,
+      "decision": "attention",
+      "confidence": 0.84,
+      "gate_mean": 0.19,
+      "gate_std": 0.07,
+      "trend": -0.002,
+      "reasoning": "Consistent attention in final layers"
+    },
+    {
+      "layer_idx": 29,
+      "decision": "hybrid",
+      "confidence": 0.78,
+      "gate_mean": 0.39,
+      "gate_std": 0.10,
+      "trend": 0.001,
+      "reasoning": "Final hybrid layer for complete integration"
+    },
+    {
+      "layer_idx": 30,
+      "decision": "attention",
+      "confidence": 0.86,
+      "gate_mean": 0.17,
+      "gate_std": 0.06,
+      "trend": -0.002,
+      "reasoning": "Penultimate layer focuses on attention"
+    },
+    {
+      "layer_idx": 31,
+      "decision": "hybrid",
+      "confidence": 0.80,
+      "gate_mean": 0.43,
+      "gate_std": 0.09,
+      "trend": 0.000,
+      "reasoning": "Final layer - preserve both branches for maximum expressiveness"
+    }
+  ],
+  
+  "pruning_summary": {
+    "total_layers": 32,
+    "mamba_only": 7,
+    "attention_only": 11,
+    "hybrid": 14,
+    "estimated_flops_reduction": 0.35,
+    "estimated_memory_reduction": 0.28,
+    "estimated_speedup": {
+      "prefill": 1.15,
+      "decode": 1.42
+    },
+    "preserved_capabilities": [
+      "long_range_dependencies",
+      "local_attention",
+      "complex_reasoning",
+      "code_understanding"
+    ]
+  },
+  
+  "deployment_config": {
+    "export_format": "pytorch",
+    "quantization": {
+      "enabled": false,
+      "method": "int8",
+      "calibration_dataset": "sampled_validation"
+    },
+    "optimization": {
+      "fuse_operations": true,
+      "remove_unused_weights": true,
+      "compress_activations": false
+    },
+    "runtime_requirements": {
+      "min_gpu_memory": "24GB",
+      "recommended_gpu": "A100",
+      "batch_size_limit": 8,
+      "sequence_length_limit": 32768
+    }
+  },
+  
+  "validation_results": {
+    "perplexity_degradation": 0.05,
+    "longbench_score_retention": 0.97,
+    "needle_accuracy_retention": 0.99,
+    "code_completion_retention": 0.95,
+    "inference_speedup_measured": 1.38
+  }
+} 
