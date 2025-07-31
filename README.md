@@ -56,64 +56,344 @@ FusionTree/
 
 ## 🔥 架构设计图
 
-以下是FusionTree的核心架构图：
+### 🏗️ 完整系统架构
+
+以下是FusionTree的完整系统架构，展示从数据处理到模型部署的全流程：
 
 ```mermaid
 graph TB
-    subgraph "FusionTree 混合架构语言模型"
-        A[输入Token序列] --> B[词嵌入层]
-        B --> C[共享RoPE缓存]
-        
-        subgraph "HybridBlock Stack (18层)"
-            D[输入层归一化] --> E[共享SRTE编码]
-            E --> F[分支输入准备]
+    subgraph "FusionTree 完整系统架构"
+        subgraph "数据处理层"
+            A1["JSONL文件"] --> A2["LazyDataset<br/>大文件懒加载"]
+            A3["HF数据集"] --> A4["StreamingDataset<br/>在线流式加载"]
+            A5["静态文件"] --> A6["LongContextDataset<br/>传统加载"]
             
-            subgraph "并行双分支"
-                F --> G[Mamba分支<br/>+时间编码]
-                F --> H[Attention分支<br/>+RoPE编码]
+            A2 --> A7["统一CollateFunction<br/>PAD Token对齐"]
+            A4 --> A7
+            A6 --> A7
+            
+            A7 --> A8["DataLoader<br/>分布式采样器"]
+        end
+        
+        subgraph "训练引擎层"
+            B1["TrainingEngine"] --> B2["DeepSpeed初始化<br/>ZeRO-2/3选择"]
+            B2 --> B3["SDPA后端启用<br/>FlashAttention2优先"]
+            B3 --> B4["分布式同步<br/>NCCL Backend"]
+        end
+        
+        subgraph "模型核心层"
+            C1["HybridLanguageModel"] --> C2["共享组件初始化"]
+            C2 --> C3["共享SRTE<br/>跨层时间编码"]
+            C2 --> C4["共享RoPE<br/>动态位置缓存"]
+            
+            C1 --> C5["HybridBlock Stack"]
+            
+            subgraph "HybridBlock内部结构"
+                D1["输入Token"] --> D2["词嵌入+Dropout"]
+                D2 --> D3["层归一化"]
+                D3 --> D4["SRTE时间编码获取"]
                 
-                subgraph "Attention分支详情"
-                    H --> I[QKV投影]
-                    I --> J[局部头<br/>滑窗256]
-                    I --> K[全局头×2<br/>完整序列]
-                    J --> L[SDPA块化计算]
-                    K --> M[SDPA全局计算]
-                    L --> N[合并局部+全局]
-                    M --> N
-                end
+                D4 --> D5["分支输入准备"]
+                D5 --> D6["Mamba分支<br/>+时间编码"]
+                D5 --> D7["Attention分支<br/>RoPE编码"]
                 
                 subgraph "Mamba分支详情"
-                    G --> O[SSM扫描]
-                    O --> P[状态更新]
-                    P --> Q[输出投影]
+                    E1["状态空间投影"] --> E2["选择性机制"]
+                    E2 --> E3["并行扫描算法"]
+                    E3 --> E4["输出投影"]
+                end
+                
+                subgraph "Attention分支详情"
+                    F1["QKV投影"] --> F2["多头分离"]
+                    F2 --> F3["局部头x10<br/>滑窗256"]
+                    F2 --> F4["全局头x2<br/>完整序列"]
+                    
+                    F3 --> F5["SDPA块化计算<br/>内存优化"]
+                    F4 --> F6["SDPA全局计算<br/>FlashAttention2"]
+                    
+                    F5 --> F7["局部+全局合并"]
+                    F6 --> F7
+                    F7 --> F8["输出投影+Dropout"]
+                end
+                
+                D6 --> E1
+                D7 --> F1
+                E4 --> G1["特征对齐MLP"]
+                F8 --> G1
+                
+                G1 --> G2["低秩门控计算<br/>H→r→H逐通道"]
+                G2 --> G3["动态权重融合<br/>alpha*Mamba + (1-alpha)*Attention"]
+                G3 --> G4["融合投影"]
+                G4 --> G5["小型MLP<br/>2H扩展"]
+                G5 --> G6["残差连接"]
+                G6 --> G7["输出层归一化"]
+            end
+        end
+        
+        subgraph "优化策略层"
+            H1["梯度检查点<br/>选择性重计算"] --> H2["只对Mamba+Attention"]
+            H3["SDPA自动后端"] --> H4["FlashAttention2<br/>Memory-Efficient<br/>Math回落"]
+            H5["DeepSpeed ZeRO"] --> H6["参数分片<br/>梯度分片<br/>优化器分片"]
+            H7["混合精度"] --> H8["BF16计算<br/>FP32累积"]
+        end
+        
+        subgraph "损失函数层"
+            I1["HybridModelLoss"] --> I2["语言建模损失<br/>CrossEntropy"]
+            I1 --> I3["负载均衡损失<br/>门控均值约束"]
+            I1 --> I4["熵正则损失<br/>防止极化"]
+            I1 --> I5["知识蒸馏损失<br/>可选"]
+            
+            I2 --> I6["总损失聚合"]
+            I3 --> I6
+            I4 --> I6
+            I5 --> I6
+        end
+        
+        subgraph "监控与部署层"
+            J1["GateMonitor"] --> J2["实时门控统计<br/>均值/方差/分布"]
+            J2 --> J3["裁剪计划生成<br/>阈值判断"]
+            J3 --> J4["静态模型导出<br/>分支移除"]
+            
+            J5["Wandb集成"] --> J6["训练曲线<br/>门控热力图<br/>性能指标"]
+        end
+        
+        subgraph "推理部署层"
+            K1["模型检查点"] --> K2["权重加载"]
+            K2 --> K3["裁剪应用<br/>可选"]
+            K3 --> K4["推理运行时"]
+            K4 --> K5["KV缓存<br/>增量生成"]
+        end
+    end
+    
+    %% 数据流连接
+    A8 --> B1
+    B4 --> C1
+    C5 --> G7
+    G7 --> I1
+    I6 --> H1
+    H1 --> J1
+    J4 --> K1
+    
+    %% 样式定义
+    classDef dataLayer fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef engineLayer fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef modelLayer fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef optimLayer fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef monitorLayer fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    
+    class A1,A2,A3,A4,A5,A6,A7,A8 dataLayer
+    class B1,B2,B3,B4 engineLayer
+    class C1,C2,C3,C4,C5,D1,D2,D3,D4,D5,D6,D7,E1,E2,E3,E4,F1,F2,F3,F4,F5,F6,F7,F8,G1,G2,G3,G4,G5,G6,G7 modelLayer
+    class H1,H2,H3,H4,H5,H6,H7,H8,I1,I2,I3,I4,I5,I6 optimLayer
+    class J1,J2,J3,J4,J5,J6,K1,K2,K3,K4,K5 monitorLayer
+```
+
+### 🔄 训练流程图
+
+详细展示FusionTree的完整训练过程，从环境初始化到模型部署：
+
+```mermaid
+flowchart TD
+    subgraph "FusionTree 训练流程"
+        A["开始训练"] --> B["环境初始化"]
+        B --> C["配置文件加载<br/>pretrain_wikipedia.yaml"]
+        C --> D["分布式设置<br/>torchrun --nproc_per_node=8"]
+        
+        D --> E["数据层初始化"]
+        E --> F["Tokenizer加载<br/>GPT-2 tokenizer"]
+        F --> G["数据集创建<br/>LazyDataset"]
+        G --> H["DataLoader设置<br/>batch_size=4, grad_accum=2"]
+        
+        H --> I["模型架构初始化"]
+        I --> J["共享组件创建<br/>SRTE + RoPE"]
+        J --> K["HybridBlock Stack<br/>18层混合块"]
+        K --> L["语言建模头<br/>词汇表映射"]
+        
+        L --> M["DeepSpeed引擎初始化"]
+        M --> N["ZeRO-2配置<br/>参数分片"]
+        N --> O["SDPA后端启用<br/>FlashAttention2优先"]
+        O --> P["梯度检查点配置<br/>选择性重计算"]
+        
+        P --> Q["开始训练循环"]
+        
+        subgraph "单步训练过程"
+            Q1["数据批次加载<br/>序列长度1024"] --> Q2["前向传播"]
+            
+            subgraph "前向传播详情"
+                R1["词嵌入"] --> R2["HybridBlock-1"]
+                R2 --> R3["..."]
+                R3 --> R4["HybridBlock-18"]
+                R4 --> R5["语言建模头"]
+                
+                subgraph "HybridBlock前向"
+                    S1["层归一化"] --> S2["SRTE编码获取"]
+                    S2 --> S3["Mamba分支计算"]
+                    S2 --> S4["Attention分支计算"]
+                    S3 --> S5["特征对齐MLP"]
+                    S4 --> S5
+                    S5 --> S6["门控权重计算"]
+                    S6 --> S7["动态融合"]
+                    S7 --> S8["输出投影+残差"]
                 end
             end
             
-            N --> R[特征对齐MLP]
-            Q --> R
-            R --> S[低秩门控<br/>逐通道权重]
-            S --> T[门控融合]
-            T --> U[融合投影]
-            U --> V[小型MLP 2H]
-            V --> W[残差连接+层归一化]
+            Q2 --> Q3["损失计算"]
+            
+            subgraph "复合损失"
+                T1["语言建模损失<br/>CrossEntropy"] --> T4["总损失"]
+                T2["负载均衡损失<br/>coeff=0.05"] --> T4
+                T3["熵正则损失<br/>coeff=3e-4"] --> T4
+            end
+            
+            Q3 --> Q4["反向传播<br/>梯度计算"]
+            Q4 --> Q5["梯度累积<br/>2步累积"]
+            Q5 --> Q6{"是否更新?<br/>step % grad_accum == 0"}
+            
+            Q6 -->|"是"| Q7["梯度裁剪<br/>max_norm=1.0"]
+            Q7 --> Q8["优化器更新<br/>AdamW"]
+            Q8 --> Q9["学习率调度<br/>Cosine衰减"]
+            Q9 --> Q10["梯度清零"]
+            
+            Q6 -->|"否"| Q11["继续累积"]
+            Q11 --> Q1
+            Q10 --> Q12["门控统计收集"]
         end
         
-        W --> X[最终层归一化]
-        X --> Y[语言建模头]
-        Y --> Z[输出Logits]
+        Q --> Q1
+        Q12 --> U["日志记录与监控"]
         
-        subgraph "训练优化"
-            AA[梯度检查点<br/>Mamba+Attention]
-            BB[SDPA自动后端<br/>FlashAttention2]
-            CC[DeepSpeed ZeRO-2<br/>参数分片]
-            DD[门控正则损失<br/>负载均衡+熵正则]
+        subgraph "监控与检查点"
+            U --> V{"step % log_interval == 0?"}
+            V -->|"是"| W["打印训练指标<br/>LM loss, gate_mean, LR"]
+            V -->|"否"| X
+            
+            W --> X{"step % save_interval == 0?"}
+            X -->|"是"| Y["保存检查点<br/>同步barrier"]
+            X -->|"否"| Z
+            
+            Y --> Y1["DeepSpeed checkpoint保存<br/>gather_16bit_weights=False"]
+            Y1 --> Y2["门控统计保存<br/>裁剪计划更新"]
+            Y2 --> Z
+            
+            Z{"step >= max_steps?"}
+            Z -->|"否"| Q1
+            Z -->|"是"| AA["训练完成"]
         end
         
-        subgraph "监控与裁剪"
-            EE[门控统计收集] --> FF[裁剪计划生成]
-            FF --> GG[静态模型导出]
+        AA --> BB["最终检查点保存"]
+        BB --> CC["门控统计分析"]
+        CC --> DD["裁剪计划生成"]
+        DD --> EE["模型导出<br/>静态/裁剪版本"]
+    end
+    
+    %% 样式定义
+    classDef initStep fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef dataStep fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+    classDef modelStep fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef trainStep fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef monitorStep fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    
+    class A,B,C,D initStep
+    class E,F,G,H dataStep
+    class I,J,K,L,M,N,O,P modelStep
+    class Q,Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8,Q9,Q10,Q11,Q12,R1,R2,R3,R4,R5,S1,S2,S3,S4,S5,S6,S7,S8,T1,T2,T3,T4 trainStep
+    class U,V,W,X,Y,Y1,Y2,Z,AA,BB,CC,DD,EE monitorStep
+```
+
+### 🔗 组件关系图
+
+展示FusionTree各模块之间的依赖关系和数据流：
+
+```mermaid
+graph LR
+    subgraph "FusionTree 组件关系图"
+        subgraph "配置层"
+            A["configs/<br/>pretrain_wikipedia.yaml"]
+            B["environment.yml<br/>依赖管理"]
+        end
+        
+        subgraph "数据层"
+            C["train/data.py<br/>LongContextDataset"]
+            D["train/lazy_data.py<br/>LazyDataset"]  
+            E["train/streaming_data.py<br/>StreamingDataset"]
+            
+            C --> F["统一CollateFunction"]
+            D --> F
+            E --> F
+        end
+        
+        subgraph "模型核心"
+            G["models/hybrid_model.py<br/>HybridLanguageModel"]
+            H["models/hybrid_block.py<br/>HybridBlock + SRTE"]
+            I["models/mamba_block.py<br/>MambaBlock"]
+            J["models/local_global_attn.py<br/>LocalGlobalAttention + RoPE"]
+            
+            G --> H
+            H --> I
+            H --> J
+            H --> K["共享SRTE"]
+            G --> L["共享RoPE"]
+            J --> L
+        end
+        
+        subgraph "训练引擎"
+            M["train/engine.py<br/>TrainingEngine"]
+            N["train/losses.py<br/>HybridModelLoss"]
+            O["train/monitor_gate.py<br/>GateMonitor"]
+            
+            M --> N
+            M --> O
+        end
+        
+        subgraph "优化组件"
+            P["DeepSpeed ZeRO-2<br/>参数分片"]
+            Q["SDPA Backend<br/>FlashAttention2"]
+            R["Gradient Checkpointing<br/>选择性重计算"]
+            S["Mixed Precision<br/>BF16训练"]
+        end
+        
+        subgraph "部署工具"
+            T["deploy/export_pruned.py<br/>模型裁剪"]
+            U["deploy/runtime_stub.py<br/>推理运行时"]
+            
+            T --> V["静态模型"]
+            U --> W["KV缓存推理"]
         end
     end
+    
+    %% 依赖关系
+    A --> M
+    B --> M
+    F --> M
+    G --> M
+    P --> M
+    Q --> J
+    R --> H
+    S --> M
+    O --> T
+    
+    %% 数据流
+    M -.->|"训练数据"| F
+    M -.->|"模型参数"| G
+    M -.->|"损失计算"| N
+    M -.->|"门控统计"| O
+    N -.->|"梯度"| M
+    O -.->|"裁剪计划"| T
+    
+    %% 样式
+    classDef configLayer fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef dataLayer fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px  
+    classDef modelLayer fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef trainLayer fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    classDef optimLayer fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef deployLayer fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    
+    class A,B configLayer
+    class C,D,E,F dataLayer
+    class G,H,I,J,K,L modelLayer
+    class M,N,O trainLayer
+    class P,Q,R,S optimLayer
+    class T,U,V,W deployLayer
 ```
 
 ## 🚀 快速开始
