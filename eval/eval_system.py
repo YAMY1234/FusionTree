@@ -33,7 +33,11 @@ class SystemPerformanceEvaluator:
     def _load_model(self):
         """加载模型"""
         try:
-            checkpoint = torch.load(self.model_path, map_location='cpu')
+            try:
+                checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=True)
+            except Exception:
+                # 回退到传统加载方式（用于包含自定义对象的检查点）
+                checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=False)
             
             if 'config' in checkpoint:
                 config = HybridLanguageModelConfig(**checkpoint['config']['model'])
@@ -376,13 +380,21 @@ def _compute_summary(results: Dict[str, Any]) -> Dict[str, Any]:
         successful_runs = [v for v in memory_data.values() if v.get('status') == 'success']
         
         if successful_runs:
-            peak_memories = [run['peak_memory_gb'] for run in successful_runs]
+            peak_memories = [run['peak_memory_gb'] for run in successful_runs if run.get('peak_memory_gb') is not None]
+            if peak_memories:  # 确保列表不为空
             summary['memory'] = {
                 'max_peak_memory_gb': max(peak_memories),
                 'avg_peak_memory_gb': np.mean(peak_memories),
                 'successful_runs': len(successful_runs),
                 'total_runs': len(memory_data)
             }
+            else:
+                summary['memory'] = {
+                    'max_peak_memory_gb': 0.0,
+                    'avg_peak_memory_gb': 0.0,
+                    'successful_runs': len(successful_runs),
+                    'total_runs': len(memory_data)
+                }
     
     # 速度摘要
     if 'speed' in results:

@@ -1,0 +1,89 @@
+# 🚀 HuggingFace流式数据加载配置 - 工业界最佳实践
+# 边下边训，内存占用极小，支持无限大数据集
+
+model:
+  hidden_size: 768
+  intermediate_size: 2048
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  num_key_value_heads: 12
+  vocab_size: 50257        # GPT2分词器词汇表大小
+  max_position_embeddings: 2048
+  window_size: 1024        # 实际使用的上下文长度
+  rms_norm_eps: 1e-06
+  tie_word_embeddings: false
+  drop_branch_prob: 0.1    # 分支随机丢弃概率
+  
+  # Mamba配置
+  mamba_config:
+    state_size: 16
+    conv_kernel: 4
+    expand_factor: 2
+
+training:
+  max_steps: 5000          # 流式训练：可以设置更大的步数
+  warmup_steps: 500
+  learning_rate: 3e-4
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  max_grad_norm: 1.0
+  
+  # 批次配置
+  batch_size: 4            # 每GPU批次大小
+  gradient_accumulation_steps: 4
+  max_seq_length: 1024
+  
+  # 混合精度
+  fp16: false
+  bf16: true
+
+data:
+  # 🔥 模式1：使用预设的数据混合
+  data_mode: hf_streaming
+  hf_preset: wikipedia_only    # wikipedia_only|english_mix|multilingual_mix
+  
+  # 🔥 模式2：自定义数据源配置（注释掉上面的hf_preset后启用）
+  # hf_streaming_sources:
+  #   - name: "wikimedia/wikipedia"
+  #     config: "20231101.en"
+  #     split: "train"
+  #     text_key: "text"
+  #     weight: 1.0
+  #   - name: "Skylion007/openwebtext"
+  #     split: "train"
+  #     text_key: "text"
+  #     weight: 1.5
+  
+  # 数据处理配置
+  tokenizer_path: "gpt2"
+  max_length: 1024
+  min_length: 50
+  concat_docs: true          # ✅ 启用token级打包
+  add_special_tokens: true
+  document_separator: "\n\n"
+  
+  # 流式优化配置
+  shuffle_buffer_size: 10000
+  trust_remote_code: false
+  num_workers: 0             # 流式模式推荐0
+  pin_memory: true
+  seed: 42
+
+system:
+  use_deepspeed: true
+  zero_stage: 2
+  offload_optimizer: false   # ZeRO-2关闭offload避免卡顿
+  offload_params: false
+  
+  # 分布式配置
+  find_unused_parameters: false
+
+logging:
+  log_interval: 25
+  save_interval: 1000        # 流式训练：可以设置更大的保存间隔
+  eval_interval: 500
+  project_name: "FusionTree-HF-Streaming"
+  experiment_name: "wikipedia-streaming-test"
+  use_wandb: false 

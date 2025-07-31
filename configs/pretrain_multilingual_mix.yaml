@@ -1,0 +1,98 @@
+# 🌍 多语言多数据源混合训练配置
+# 展示HF流式加载的强大混合能力
+
+model:
+  hidden_size: 768
+  intermediate_size: 2048
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  num_key_value_heads: 12
+  vocab_size: 50257        # GPT2分词器（可考虑换成多语言分词器）
+  max_position_embeddings: 2048
+  window_size: 1024
+  rms_norm_eps: 1e-06
+  tie_word_embeddings: false
+  drop_branch_prob: 0.1
+  
+  mamba_config:
+    state_size: 16
+    conv_kernel: 4
+    expand_factor: 2
+
+training:
+  max_steps: 10000         # 更大的数据集需要更多步数
+  warmup_steps: 1000
+  learning_rate: 2e-4      # 多源数据可以用稍小的学习率
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  max_grad_norm: 1.0
+  
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_seq_length: 1024
+  
+  fp16: false
+  bf16: true
+
+data:
+  # 🔥 多数据源按权重混合
+  data_mode: hf_streaming
+  hf_streaming_sources:
+    # 英文维基百科 - 基础权重
+    - name: "wikimedia/wikipedia"
+      config: "20231101.en"
+      split: "train"
+      text_key: "text"
+      weight: 1.0
+    
+    # 中文维基百科 - 较小权重
+    - name: "wikimedia/wikipedia"
+      config: "20231101.zh"
+      split: "train"
+      text_key: "text"
+      weight: 0.3
+      
+    # OpenWebText - 更大权重（网络文本）
+    - name: "Skylion007/openwebtext"
+      split: "train"
+      text_key: "text"
+      weight: 1.5
+      
+    # C4英文 - 补充的清洗网络文本
+    - name: "c4"
+      config: "en"
+      split: "train"
+      text_key: "text"
+      weight: 0.8
+  
+  # 数据处理配置
+  tokenizer_path: "gpt2"
+  max_length: 1024
+  min_length: 100          # 多源混合时用更严格的过滤
+  concat_docs: true
+  add_special_tokens: true
+  document_separator: "\n\n"
+  
+  # 流式优化
+  shuffle_buffer_size: 20000  # 更大的shuffle buffer
+  trust_remote_code: false
+  num_workers: 0
+  pin_memory: true
+  seed: 42
+
+system:
+  use_deepspeed: true
+  zero_stage: 2
+  offload_optimizer: false
+  offload_params: false
+  find_unused_parameters: false
+
+logging:
+  log_interval: 50
+  save_interval: 2000      # 大数据集保存间隔可以更大
+  eval_interval: 1000
+  project_name: "FusionTree-Multilingual"
+  experiment_name: "wikipedia-owt-c4-mix"
+  use_wandb: false 

@@ -29,7 +29,10 @@ class InferenceRuntime:
         
         # 占位实现
         try:
-            checkpoint = torch.load(self.model_path, map_location='cpu')
+            checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=True)
+        except Exception:
+            # 回退到传统加载方式（用于包含自定义对象的检查点）
+            checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=False)
             print(f"Loaded checkpoint with keys: {list(checkpoint.keys())}")
             if 'prune_plan' in checkpoint:
                 print(f"Found pruning plan with {len(checkpoint['prune_plan'])} layers")

@@ -1,0 +1,148 @@
+# FusionTree预训练配置 - DDP版本（无DeepSpeed）
+# 基于pretrain_optimized.yaml，但禁用DeepSpeed使用PyTorch DDP
+
+training:
+  # 基础训练参数
+  max_steps: 50             # 快速测试设置
+  warmup_steps: 5           # 10% of max_steps
+  learning_rate: 0.0001     # 1e-4, 使用小数格式避免YAML解析错误
+  batch_size: 1             # DDP下减小batch size
+  gradient_accumulation_steps: 8   # 减少累积步数避免数据不够的问题
+  weight_decay: 0.01
+  
+  # AdamW优化器参数
+  beta1: 0.9                # 对应adam_beta1
+  beta2: 0.95               # 对应adam_beta2  
+  eps: 0.00000001           # 1e-8, 使用小数格式
+  
+  # 梯度相关
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  
+  # 精度和性能
+  fp16: false
+  bf16: true                # 使用bf16混合精度
+  
+  # MoE相关损失系数
+  load_balance_coeff: 0.01
+  entropy_reg_coeff: 0.0001  # 1e-4，使用小数格式
+  
+  # 知识蒸馏
+  distill_coeff: 0.5
+  distill_temperature: 3.0
+  
+  # 学习率调度器
+  lr_scheduler: "cosine"    # linear, cosine, polynomial
+  min_lr_ratio: 0.1         # 最小学习率比例
+
+model:
+  # 基础架构参数 - 小型版本降低内存使用
+  vocab_size: 50432
+  hidden_size: 2048         # 从4096降到2048，大幅减少参数量
+  num_layers: 24            # 从32降到24层
+  num_heads: 16             # 从32降到16
+  window_size: 1024
+  global_heads: 2
+  gate_rank: 128            # 从256降到128
+  max_position_embeddings: 32768  # 与max_seq_length一致
+  
+  # 关键优化：SRTE配置
+  srte_encoding: "factorized"    # 使用因式分解learnable编码
+  srte_share_across_layers: true # 层间共享降低参数量
+  srte_factorized_rank: 128      # 因式分解维度：32768*128 + 128*2048
+  
+  # 模型配置参数（只包含HybridLanguageModelConfig支持的参数）
+  layer_norm_eps: 0.00001   # 1e-5，使用小数格式
+  dropout: 0.0              # 总的dropout率
+  drop_branch_prob: 0.1     # 分支dropout概率
+  use_alignment: true       # 使用对齐
+  tie_word_embeddings: false # 是否绑定词嵌入权重
+
+data:
+  # 数据集配置
+  train_data_paths:
+    - "data/dummy_train.jsonl"
+  
+  eval_data_paths:
+    longbench:
+      - "data/dummy_eval.jsonl"
+  
+  # 预处理
+  tokenizer_path: "gpt2"  # 使用gpt2 tokenizer
+  max_length: 1024        # 从32768降到1024减少内存使用
+  min_length: 1           # 降低最小长度避免过滤过多样本
+  concat_docs: true       # 启用文档拼接，为packing提供材料
+  enable_packing: false   # 先禁用packing确保基础功能正常
+  document_separator: "\n\n"
+  add_special_tokens: true
+  needle_in_haystack_prob: 0.05
+  structured_task_prob: 0.1
+  
+  # 数据加载
+  num_workers: 0  # 设为0便于调试
+  pin_memory: true
+  prefetch_factor: 2
+
+# 长度课程学习
+curriculum:
+  enabled: false  # 简化配置，禁用课程学习
+  schedule: "standard"
+  custom_schedule:
+    - [4096, 1000]
+    - [8192, 1000] 
+    - [16384, 1000]
+    - [32768, 5000]
+  
+device:
+  # 设备配置
+  use_gpu: true
+  mixed_precision: "bf16"   # 使用bf16混合精度训练
+  compile_model: false      # 如需PyTorch 2.0编译优化可设为true
+
+logging:
+  # 日志配置
+  log_level: "INFO"         # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_dir: "logs/"
+  log_file: null            # 如果设置，会输出到文件
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Wandb配置 - 已禁用
+  wandb:
+    enabled: false           # 关闭wandb跟踪
+    project: "fusion-tree-ddp"
+    name: "ddp-pretrain"
+    tags: ["hybrid", "mamba", "attention", "ddp", "no-deepspeed"]
+
+# 门控监控配置
+gate_monitor:
+  enabled: true
+  collect_detailed: true
+  log_interval: 100
+  save_interval: 1000
+  save_path: "checkpoints/gate_stats.json"
+  
+  # 裁剪阈值
+  mamba_threshold_high: 0.8
+  attention_threshold_low: 0.2
+  min_steps_for_pruning: 500
+
+# 系统配置 - DDP版本
+system:
+  # 分布式训练
+  distributed: true
+  backend: "nccl"
+  find_unused_parameters: false
+  
+  # 禁用DeepSpeed，使用PyTorch DDP
+  use_deepspeed: false      # 禁用DeepSpeed
+  zero_stage: 0             # 不使用ZeRO
+  offload_optimizer: false  # DDP不支持offload
+  offload_params: false     # DDP不支持offload
+  
+  # 编译优化
+  compile_model: false      # PyTorch 2.0 compile
+
+# 说明：
+# 这个配置文件禁用了DeepSpeed，使用原生PyTorch DDP
+# 优点：更简单，不易出现NCCL通信死锁
+# 缺点：内存效率较低，需要更小的batch_size和更多的gradient_accumulation 

@@ -1,0 +1,28 @@
+# environment-gpu.yml
+name: fusiontree-gpu
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.4.*
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - cudatoolkit-dev
+  - ninja  # 编译加速
+  - cmake
+  - pip
+  - numpy
+  - matplotlib
+  - seaborn
+  - pyyaml
+  - tqdm
+  - pip:
+    - transformers>=4.36.0
+    - datasets
+    - wandb
+    - flash-attn --no-build-isolation
+    - triton
+    - deepspeed  # 大模型训练

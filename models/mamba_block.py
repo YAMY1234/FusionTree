@@ -6,8 +6,8 @@ MambaBlock: 状态空间模型分支，专注于长程语义依赖
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
 import math
+from typing import Optional, Tuple
 
 
 class MambaBlock(nn.Module):
@@ -59,7 +59,7 @@ class MambaBlock(nn.Module):
         self.dt_proj = nn.Linear(self.dt_rank, self.intermediate_size, bias=True)
         
         # 状态空间参数
-        # A: 状态转移矩阵 (D, N) - 初始化为负实数
+        # A: 状态转移矩阵 (D, N) - 初始化为负实数，但保持bfloat16兼容性
         A = torch.arange(1, self.state_size + 1, dtype=torch.float32).repeat(self.intermediate_size, 1)
         self.A_log = nn.Parameter(torch.log(A))
         
@@ -120,8 +120,8 @@ class MambaBlock(nn.Module):
         dt = self.dt_proj(dt)  # [B, L, D]
         dt = F.softplus(dt + self.dt_proj.bias)
         
-        # 获取状态转移矩阵A
-        A = -torch.exp(self.A_log.float())  # [D, N]
+        # 获取状态转移矩阵A，确保类型匹配
+        A = -torch.exp(self.A_log)  # [D, N] 保持与输入相同的dtype
         
         # 简化的SSM计算（实际应该用并行扫描算法）
         y = self._ssm_scan(x, dt, A, B, C, self.D, state)
@@ -166,10 +166,18 @@ class MambaBlock(nn.Module):
         batch_size, seq_len, d_model = x.shape
         n_state = A.shape[1]
         
+        # 确保所有张量类型一致
+        target_dtype = x.dtype
+        A = A.to(target_dtype)
+        B = B.to(target_dtype)
+        C = C.to(target_dtype)
+        D = D.to(target_dtype)
+        dt = dt.to(target_dtype)
+        
         if initial_state is None:
-            h = torch.zeros(batch_size, d_model, n_state, device=x.device, dtype=x.dtype)
+            h = torch.zeros(batch_size, d_model, n_state, device=x.device, dtype=target_dtype)
         else:
-            h = initial_state
+            h = initial_state.to(target_dtype)
         
         outputs = []
         
@@ -187,7 +195,7 @@ class MambaBlock(nn.Module):
             # 状态更新
             h = h * dA + dB * x_i.unsqueeze(-1)  # [B, D, N]
             
-            # 输出计算
+            # 输出计算 - 确保所有张量类型一致
             y_i = torch.einsum('bdn,bn->bd', h, C_i) + x_i * D
             outputs.append(y_i)
         
@@ -209,10 +217,16 @@ class MambaBlock(nn.Module):
         batch_size, seq_len, d_model = x.shape
         n_state = A.shape[1]
         
+        # 确保类型一致
+        target_dtype = x.dtype
+        A = A.to(target_dtype)
+        B = B.to(target_dtype)
+        dt = dt.to(target_dtype)
+        
         if initial_state is None:
-            h = torch.zeros(batch_size, d_model, n_state, device=x.device, dtype=x.dtype)
+            h = torch.zeros(batch_size, d_model, n_state, device=x.device, dtype=target_dtype)
         else:
-            h = initial_state
+            h = initial_state.to(target_dtype)
             
         # 简化：只返回最后时间步的状态
         # 实际实现应该使用高效的并行算法

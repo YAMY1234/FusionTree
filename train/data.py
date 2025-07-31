@@ -10,8 +10,11 @@ from typing import List, Dict, Optional, Any, Tuple
 import json
 import random
 import numpy as np
-from pathlib import Path
 import logging
+from pathlib import Path
+from functools import partial
+import glob  # 🔧 添加glob支持通配符路径
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,34 +70,59 @@ class LongContextDataset(Dataset):
     def _load_documents(self, data_paths: List[str]) -> List[Dict[str, Any]]:
         """加载文档数据"""
         documents = []
+        logger = logging.getLogger(__name__)
         
-        for path in data_paths:
-            path = Path(path)
-            if not path.exists():
-                logger.warning(f"Data path {path} does not exist, skipping")
+        for path_pattern in data_paths:
+            # 🔧 使用glob展开通配符路径
+            expanded_paths = glob.glob(str(path_pattern))
+            
+            if not expanded_paths:
+                logger.warning(f"Data path {path_pattern} does not exist, skipping")
                 continue
             
-            if path.suffix == '.jsonl':
-                with open(path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip():
-                            doc = json.loads(line)
-                            documents.append(doc)
-            elif path.suffix == '.json':
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        documents.extend(data)
+            logger.info(f"Found {len(expanded_paths)} files matching pattern: {path_pattern}")
+            
+            # 处理每个展开的文件路径
+            for file_path in expanded_paths:
+                logger.info(f"Processing file: {file_path}")
+                path = Path(file_path)
+                
+                if not path.exists():
+                    logger.warning(f"File {path} does not exist, skipping")
+                    continue
+                
+                try:
+                    if path.suffix == '.jsonl':
+                        with open(path, 'r', encoding='utf-8') as f:
+                            for line_num, line in enumerate(f, 1):
+                                if line_num % 10000 == 0:  # 减少日志频率
+                                    logger.info(f"Processing line {line_num} of {file_path}")
+                                if line.strip():
+                                    try:
+                                        doc = json.loads(line)
+                                        documents.append(doc)
+                                    except json.JSONDecodeError as e:
+                                        logger.warning(f"Invalid JSON in {path}:{line_num}: {e}")
+                                        continue
+                    elif path.suffix == '.json':
+                        with open(path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            if isinstance(data, list):
+                                documents.extend(data)
+                            else:
+                                documents.append(data)
                     else:
-                        documents.append(data)
-            else:
-                # 纯文本文件
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    # 按段落分割
-                    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
-                    for para in paragraphs:
-                        documents.append({'text': para, 'source': str(path)})
+                        # 纯文本文件
+                        with open(path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            # 按段落分割
+                            paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+                            for para in paragraphs:
+                                documents.append({'text': para, 'source': str(path)})
+                                
+                except Exception as e:
+                    logger.error(f"Error loading file {path}: {e}")
+                    continue
         
         return documents
     
@@ -134,8 +162,13 @@ class LongContextDataset(Dataset):
                 test_text += self.document_separator
             test_text += text
             
-            # 检查是否超长
-            test_tokens = self.tokenizer.encode(test_text, add_special_tokens=False)
+            # 检查是否超长 - 添加截断参数避免警告
+            test_tokens = self.tokenizer.encode(
+                test_text, 
+                add_special_tokens=False,
+                max_length=self.max_length,
+                truncation=True
+            )
             
             if len(test_tokens) <= self.max_length:
                 # 可以添加
@@ -148,9 +181,19 @@ class LongContextDataset(Dataset):
                     if example:
                         examples.append(example)
                 
-                # 开始新序列
-                current_text = text
-                current_docs = [doc]
+                # 开始新序列 - 如果单个文档就超长，也要截断
+                if len(self.tokenizer.encode(text, add_special_tokens=False, max_length=self.max_length, truncation=True)) <= self.max_length:
+                    current_text = text
+                    current_docs = [doc]
+                else:
+                    # 单个文档就超长，创建截断版本
+                    truncated_example = self._tokenize_text(text)
+                    if truncated_example['input_ids'].size(0) >= self.min_length:
+                        truncated_example['num_docs'] = 1
+                        truncated_example['doc_sources'] = [doc.get('source', 'unknown')]
+                        examples.append(truncated_example)
+                    current_text = ""
+                    current_docs = []
         
         # 处理最后一个序列
         if current_text and len(current_docs) > 0:
@@ -272,6 +315,9 @@ class LengthCurriculumDataset(LongContextDataset):
         
         # 从最小长度开始
         initial_length = curriculum_schedule[0][0]
+        # 确保不会把 max_length 传两次
+        kwargs = dict(kwargs)
+        kwargs.pop('max_length', None)
         super().__init__(max_length=initial_length, **kwargs)
     
     def step(self) -> bool:
@@ -299,13 +345,16 @@ class LengthCurriculumDataset(LongContextDataset):
         return False
 
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: List[Dict[str, torch.Tensor]], max_model_length: int = 1024) -> Dict[str, torch.Tensor]:
     """
     数据批处理函数
     处理不同长度的序列，进行padding
     """
-    # 获取最大长度
+    # 获取最大长度，但不超过模型最大处理能力
     max_length = max(item['input_ids'].size(0) for item in batch)
+    if max_length > max_model_length:
+        logger.warning(f"Batch contains sequences longer than max_model_length ({max_length} > {max_model_length}), truncating...")
+        max_length = max_model_length
     
     batch_input_ids = []
     batch_attention_mask = []
@@ -315,6 +364,12 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         input_ids = item['input_ids']
         attention_mask = item['attention_mask']
         labels = item['labels']
+        
+        # 如果序列太长，截断
+        if input_ids.size(0) > max_length:
+            input_ids = input_ids[:max_length]
+            attention_mask = attention_mask[:max_length]
+            labels = labels[:max_length]
         
         # 右padding
         pad_length = max_length - input_ids.size(0)
@@ -342,6 +397,9 @@ def create_data_loader(
     num_workers: int = 0,
     shuffle: bool = True,
     curriculum_schedule: Optional[List[Tuple[int, int]]] = None,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    distributed: bool = False,
     **dataset_kwargs
 ) -> DataLoader:
     """
@@ -355,6 +413,9 @@ def create_data_loader(
         num_workers: 工作进程数
         shuffle: 是否打乱
         curriculum_schedule: 长度课程计划
+        pin_memory: 是否pin内存
+        prefetch_factor: 预取因子
+        distributed: 是否使用分布式训练
         **dataset_kwargs: 其他数据集参数
         
     Returns:
@@ -376,14 +437,33 @@ def create_data_loader(
             **dataset_kwargs
         )
     
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True
-    )
+    # 分布式采样器配置
+    sampler = None
+    if distributed:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(
+            dataset, 
+            shuffle=shuffle, 
+            drop_last=True  # 关键：确保各rank的batch大小一致
+        )
+        shuffle = False  # 使用sampler时不能同时shuffle
+    
+    # 分离DataLoader参数和Dataset参数
+    dataloader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': shuffle,
+        'sampler': sampler,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'drop_last': True,  # 确保最后一个batch大小一致
+        'collate_fn': partial(collate_fn, max_model_length=max_length)
+    }
+    
+    # 添加prefetch_factor（仅当num_workers > 0时）
+    if num_workers > 0:
+        dataloader_kwargs['prefetch_factor'] = prefetch_factor
+    
+    return DataLoader(dataset, **dataloader_kwargs)
 
 
 def create_evaluation_datasets(

@@ -31,6 +31,9 @@ class HybridLanguageModelConfig:
         drop_branch_prob: float = 0.1,
         attention_type: str = "local_global",  # "local_global" or "pyramidal"
         srte_encoding: str = "learnable",  # "learnable" or "sincos"
+        # SRTE优化选项
+        srte_share_across_layers: bool = True,  # 是否在层间共享SRTE
+        srte_factorized_rank: int = 0,  # 低秩分解rank，0表示不使用
         use_alignment: bool = True,
         tie_word_embeddings: bool = False,
         # 训练相关
@@ -55,6 +58,8 @@ class HybridLanguageModelConfig:
         self.drop_branch_prob = drop_branch_prob
         self.attention_type = attention_type
         self.srte_encoding = srte_encoding
+        self.srte_share_across_layers = srte_share_across_layers
+        self.srte_factorized_rank = srte_factorized_rank
         self.use_alignment = use_alignment
         self.tie_word_embeddings = tie_word_embeddings
         self.load_balance_coeff = load_balance_coeff
@@ -97,6 +102,18 @@ class HybridLanguageModel(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.embed_dropout = nn.Dropout(config.dropout)
         
+        # 创建共享SRTE（如果配置启用）
+        self.shared_srte = None
+        if config.srte_share_across_layers:
+            from .hybrid_block import SRTE
+            self.shared_srte = SRTE(
+                config.hidden_size, 
+                max_len=config.max_position_embeddings, 
+                encoding_type=config.srte_encoding,
+                factorized_rank=config.srte_factorized_rank
+            )
+            print(f"Created shared SRTE for {config.num_layers} layers")
+        
         # 混合块堆叠
         self.layers = nn.ModuleList([
             HybridBlock(
@@ -107,6 +124,9 @@ class HybridLanguageModel(nn.Module):
                 gate_rank=config.gate_rank,
                 drop_branch_prob=config.drop_branch_prob,
                 srte_encoding=config.srte_encoding,
+                srte_max_len=config.max_position_embeddings,
+                srte_shared=self.shared_srte,
+                srte_factorized_rank=config.srte_factorized_rank,
                 use_alignment=config.use_alignment
             )
             for i in range(config.num_layers)

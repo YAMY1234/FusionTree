@@ -1,0 +1,111 @@
+# 数据文件
+*.jsonl
+*.json
+*.csv
+*.tsv
+*.txt
+*.parquet
+*.arrow
+*.feather
+data/
+datasets/
+*.h5
+*.hdf5
+
+# 模型文件和检查点
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+model_outputs/
+saved_models/
+*.model
+
+# 日志文件
+logs/
+*.log
+log/
+wandb/
+tensorboard/
+tb_logs/
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 测试和覆盖率
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.temp
+.cache/
+
+# 配置文件（可能包含敏感信息）
+.env.local
+.env.production
+config.local.yaml
+secrets.yaml
+
+# GPU 相关
+*.nccl
+nccl_debug.log
+
+# 分布式训练
+dist_info/
+
+# 特定框架文件
+# PyTorch
+lightning_logs/
+# Transformers
+runs/
+# MLflow
+mlruns/

@@ -1,0 +1,183 @@
+# HybridLanguageModel Wikipedia训练配置
+# 使用真实Wikipedia数据进行预训练
+
+training:
+  max_steps: 1000        # 增加训练步数以充分利用真实数据
+  warmup_steps: 100      # 相应增加warmup步数
+  learning_rate: 0.0001  # 1e-4
+  batch_size: 2          # 🚀 优化: 保持为2充分利用显存
+  gradient_accumulation_steps: 4   # 🚀 优化: 恢复为4提升训练效果
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 0.00000001  # 1e-8
+  
+  # 学习率调度
+  lr_scheduler: "cosine"
+  min_lr_ratio: 0.1
+  
+  # 梯度相关
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  
+  # 混合精度
+  fp16: false
+  bf16: true
+  
+  # 正则化系数
+  load_balance_coeff: 0.1
+  entropy_reg_coeff: 0.0001  # 1e-4
+  distill_coeff: 0.0  # 设为 > 0 启用蒸馏
+  distill_temperature: 4.0
+  
+  # 数据相关
+  max_seq_length: 1024  # 🚀 优化: 恢复1024序列长度
+  
+  # 保存和评估
+  save_steps: 500       # 更频繁保存checkpoint
+  eval_steps: 500
+  logging_steps: 50     # 更频繁的日志输出
+  save_total_limit: 2
+
+model:
+  # 🚀 优化后的中型模型配置 - 平衡性能与显存
+  vocab_size: 50257          # 🔧 GPT2分词器的实际词汇大小
+  hidden_size: 1536          # 🔧 优化: 768→1536 充分利用显存
+  num_layers: 18             # 🔧 优化: 12→18 增加模型深度
+  num_heads: 12              # 🔧 保持12个头适配1536维度
+  window_size: 1024          # 🔧 优化: 512→1024 恢复完整序列长度
+  global_heads: 2
+  gate_rank: 96              # 🔧 优化: 64→96 适度增加gate复杂度            
+  max_position_embeddings: 32768  
+  
+  # 关键优化：SRTE配置
+  srte_encoding: "learnable"        
+  srte_share_across_layers: true    
+  srte_factorized_rank: 128         
+  
+  # 注意力配置
+  attention_type: "local_global"    
+  
+  # 其他优化
+  tie_word_embeddings: true         
+  use_alignment: true
+  
+  # 正则化
+  layer_norm_eps: 0.00001  # 1e-5
+  dropout: 0.1
+  drop_branch_prob: 0.1  # ✅ 已修复分布式随机性问题，可安全使用
+  
+  # 损失函数权重
+  load_balance_coeff: 0.1
+  entropy_reg_coeff: 0.0001  # 1e-4
+  
+  # 推理配置
+  use_cache: true
+  pad_token_id: 50256      # GPT2的PAD token
+  bos_token_id: 50256      # GPT2使用同一个token作为BOS
+  eos_token_id: 50256      # GPT2使用同一个token作为EOS
+
+data:
+  # 💾 Lazy JSONL加载模式 - 适合本地大文件
+  data_mode: lazy           # lazy|static|hf_streaming
+  max_samples_per_file: 2000  # 🧪 测试：每个文件只用2000样本
+  
+  train_data_paths:
+    - "data/wikipedia/wiki_en/wiki_en_*.jsonl"
+    # - "data/wikipedia/wiki_en/wiki_en_00000.jsonl"
+    # - "data/wikipedia/wiki_en/wiki_en_00001.jsonl"
+    # - "data/wikipedia/wiki_en/wiki_en_00002.jsonl"
+  
+  eval_data_paths:
+    longbench:
+      - "data/wikipedia/wiki_en/wiki_en_00000.jsonl"  # 用少量数据做验证
+  
+  # 预处理配置 - 针对真实数据优化
+  tokenizer_path: "gpt2"     # 使用GPT2分词器，适合英文Wikipedia
+  max_length: 1024           # 🚀 优化: 匹配training.max_seq_length
+  min_length: 50             # 过滤过短文本
+  add_special_tokens: true
+  
+  # 数据加载 - Lazy模式优化配置
+  num_workers: 0          # 🔧 Lazy loading时推荐用0避免多进程文件访问冲突
+  pin_memory: true
+  prefetch_factor: 2
+
+# 长度课程学习 - 暂时禁用，先在固定长度上稳定训练
+curriculum:
+  enabled: false
+  schedule: "standard"
+  custom_schedule:
+    - [1024, 500]     # 先在1024长度训练500步
+    - [2048, 300]     # 再增加到2048训练300步
+    - [4096, 200]     # 最后增加到4096训练200步
+  
+device:
+  # 设备配置
+  use_gpu: true
+  mixed_precision: "bf16"   
+  compile_model: false      
+
+logging:
+  # 日志配置
+  log_level: "INFO"         
+  log_dir: "logs/"
+  log_file: null            
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_interval: 10          # 训练日志记录间隔（steps）
+  save_interval: 200        # 模型保存间隔（steps）
+  output_dir: "checkpoints/wikipedia/" # 专门的Wikipedia训练checkpoint目录
+  
+  # Wandb配置 - 可选开启用于监控
+  wandb:
+    enabled: false           # 可设为true开启wandb跟踪
+    project: "fusion-tree-wikipedia"
+    name: "wikipedia-pretrain"
+    tags: ["hybrid", "mamba", "attention", "wikipedia", "real-data"]
+
+# 门控监控配置 - 可选开启
+gate_monitor:
+  enabled: false            # 可设为true监控门控行为
+  collect_detailed: false
+  log_interval: 100
+  save_interval: 1000
+  save_path: "checkpoints/wikipedia/gate_stats.json"
+  
+  # 裁剪阈值
+  mamba_threshold_high: 0.8
+  attention_threshold_low: 0.2
+  min_steps_for_pruning: 500
+
+# 系统配置
+system:
+  # 分布式训练
+  distributed: true
+  backend: "nccl"
+  find_unused_parameters: false
+  
+  # 内存优化
+  use_deepspeed: true       
+  zero_stage: 3              # 🔧 OOM修复: 2→3 启用参数分片
+  offload_optimizer: true   # ✅ 保持关闭避免backward卡顿  
+  offload_params: true       # 🔧 OOM修复: 启用参数offload到CPU     
+  
+  # 编译优化
+  compile_model: false
+
+# 数据集信息和使用说明
+# 
+# Wikipedia数据集特点:
+# - 高质量百科全书文本
+# - 平均文章长度适中(500-2000词)
+# - 涵盖广泛主题
+# - 适合作为预训练基础数据
+#
+# 使用方法:
+# 1. 运行下载脚本: python scripts/download_datasets.py --dataset wikipedia --lang en
+# 2. 检查数据路径: ls data/wikipedia/wiki_en/
+# 3. 启动训练: bash scripts/run_pretrain.sh configs/pretrain_wikipedia.yaml [num_gpus]
+#
+# 预期效果:
+# - 在真实数据上验证模型架构
+# - 观察损失收敛情况
+# - 为后续加入更多数据源做准备 

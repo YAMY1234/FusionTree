@@ -35,7 +35,11 @@ class LanguageModelEvaluator:
         """加载模型"""
         try:
             # 尝试加载检查点
-            checkpoint = torch.load(self.model_path, map_location='cpu')
+            try:
+                checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=True)
+            except Exception:
+                # 回退到传统加载方式（用于包含自定义对象的检查点）
+                checkpoint = torch.load(self.model_path, map_location='cpu', weights_only=False)
             
             if 'config' in checkpoint:
                 # 从检查点配置创建模型

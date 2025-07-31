@@ -22,18 +22,18 @@ model:
 # 训练配置
 training:
   # 基础设置
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 1
+  gradient_accumulation_steps: 32
   max_steps: 25000
   warmup_steps: 1000
   
   # 优化器
   optimizer: "adamw"
-  learning_rate: 3e-4
+  learning_rate: 0.0003  # 3e-4
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
-  eps: 1e-8
+  eps: 0.00000001  # 1e-8
   
   # 学习率调度
   lr_scheduler: "cosine"
@@ -49,7 +49,7 @@ training:
   
   # 正则化系数
   load_balance_coeff: 0.1
-  entropy_reg_coeff: 1e-4
+  entropy_reg_coeff: 0.0001  # 1e-4
   distill_coeff: 0.0  # 设为 > 0 启用蒸馏
   distill_temperature: 4.0
 
@@ -89,7 +89,7 @@ data:
   structured_task_prob: 0.1
   
   # 数据加载
-  num_workers: 4
+  num_workers: 0  # 设为0便于调试
   pin_memory: true
   prefetch_factor: 2
 
@@ -113,9 +113,9 @@ logging:
   eval_interval: 1000
   save_interval: 2000
   
-  # Wandb配置
+  # Wandb配置 - 已禁用
   wandb:
-    enabled: true
+    enabled: false         # 关闭wandb跟踪
     project: "fusion-tree"
     name: "v1-pretrain"
     tags: ["hybrid", "mamba", "attention", "long-context"]
@@ -151,9 +151,10 @@ system:
   find_unused_parameters: false
   
   # 内存优化
-  zero_stage: 2
-  offload_optimizer: false
-  offload_params: false
+  use_deepspeed: true  # 启用DeepSpeed ZeRO-3
+  zero_stage: 3
+  offload_optimizer: true
+  offload_params: true
   
   # 编译优化
   compile_model: false  # PyTorch 2.0 compile

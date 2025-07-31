@@ -1,0 +1,181 @@
+# HybridLanguageModel 小型版本 - 内存优化配置
+# 预计参数量: ~3-4B (大幅降低内存使用)
+
+training:
+  max_steps: 50         # 快速测试训练流程
+  warmup_steps: 10      # 相应减少warmup步数
+  learning_rate: 0.0001  # 1e-4
+  batch_size: 2          # 保守设置减少内存使用
+  gradient_accumulation_steps: 4   # 从16降到4，减少单step所需样本数
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  eps: 0.00000001  # 1e-8
+  
+  # 学习率调度
+  lr_scheduler: "cosine"
+  min_lr_ratio: 0.1
+  
+  # 梯度相关
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  
+  # 混合精度
+  fp16: false
+  bf16: true
+  
+  # 正则化系数
+  load_balance_coeff: 0.1
+  entropy_reg_coeff: 0.0001  # 1e-4
+  distill_coeff: 0.0  # 设为 > 0 启用蒸馏
+  distill_temperature: 4.0
+  
+  # 数据相关
+  max_seq_length: 32768  # 减小序列长度以配合SRTE优化
+  
+  # 保存和评估
+  save_steps: 1000
+  eval_steps: 500
+  logging_steps: 100
+  save_total_limit: 3
+
+model:
+  # 基础架构参数 - 小型版本降低内存使用
+  vocab_size: 50432
+  hidden_size: 2048         # 从4096降到2048，大幅减少参数量
+  num_layers: 24            # 从32降到24层
+  num_heads: 16             # 从32降到16
+  window_size: 1024
+  global_heads: 2
+  gate_rank: 128            # 从256降到128
+  max_position_embeddings: 32768  # 与max_seq_length一致
+  
+  # 关键优化：SRTE配置
+  srte_encoding: "learnable"        # 使用可学习编码
+  srte_share_across_layers: true    # 🔥 启用层间共享SRTE，节省8.3B参数
+  srte_factorized_rank: 128         # 🔥 使用低秩分解，进一步压缩参数
+  
+  # 注意力配置
+  attention_type: "local_global"    # local_global 或 pyramidal
+  
+  # 其他优化
+  tie_word_embeddings: true         # 🔥 绑定词嵌入权重，节省206M参数
+  use_alignment: true
+  
+  # 正则化
+  layer_norm_eps: 0.00001  # 1e-5
+  dropout: 0.1
+  drop_branch_prob: 0.1  # ✅ 已修复分布式随机性问题，可安全使用
+  
+  # 损失函数权重
+  load_balance_coeff: 0.1
+  entropy_reg_coeff: 0.0001  # 1e-4
+  
+  # 推理配置
+  use_cache: true
+  pad_token_id: 0
+  bos_token_id: 1
+  eos_token_id: 2
+
+data:
+  # 数据集配置
+  train_data_paths:
+    - "data/dummy_train.jsonl"
+  
+  eval_data_paths:
+    longbench:
+      - "data/dummy_eval.jsonl"
+  
+  # 预处理
+  tokenizer_path: "gpt2"  # 使用gpt2 tokenizer
+  max_length: 1024        # 从32768降到1024减少内存使用
+  min_length: 1           # 降低最小长度避免过滤过多样本
+  concat_docs: false       # 启用文档拼接，为packing提供材料 
+  enable_packing: false   # 先禁用packing确保基础功能正常
+  document_separator: "\n\n"
+  add_special_tokens: true
+  needle_in_haystack_prob: 0.05
+  structured_task_prob: 0.1
+  
+  # 数据加载
+  num_workers: 0  # 设为0便于调试
+  pin_memory: true
+  prefetch_factor: 2
+
+# 长度课程学习
+curriculum:
+  enabled: false  # 简化配置，禁用课程学习
+  schedule: "standard"
+  custom_schedule:
+    - [4096, 1000]
+    - [8192, 1000] 
+    - [16384, 1000]
+    - [32768, 5000]
+  
+device:
+  # 设备配置
+  use_gpu: true
+  mixed_precision: "bf16"   # 使用bf16混合精度训练
+  compile_model: false      # 如需PyTorch 2.0编译优化可设为true
+
+logging:
+  # 日志配置
+  log_level: "INFO"         # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_dir: "logs/"
+  log_file: null            # 如果设置，会输出到文件
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_interval: 10          # 训练日志记录间隔（steps）
+  save_interval: 100        # 模型保存间隔（steps）
+  output_dir: "checkpoints/" # 检查点保存目录
+  
+  # Wandb配置 - 已禁用
+  wandb:
+    enabled: false           # 关闭wandb跟踪
+    project: "fusion-tree-optimized"
+    name: "optimized-pretrain"
+    tags: ["hybrid", "mamba", "attention", "optimized", "srte-shared"]
+
+# 门控监控配置 - 临时禁用避免可变长度all_gather问题
+gate_monitor:
+  enabled: false            # 禁用以排除可变长度all_gather导致的NCCL死锁
+  collect_detailed: false
+  log_interval: 100
+  save_interval: 1000
+  save_path: "checkpoints/gate_stats.json"
+  
+  # 裁剪阈值
+  mamba_threshold_high: 0.8
+  attention_threshold_low: 0.2
+  min_steps_for_pruning: 500
+
+# 系统配置
+system:
+  # 分布式训练
+  distributed: true
+  backend: "nccl"
+  find_unused_parameters: false
+  
+  # 内存优化 - 修复NCCL超时问题
+  use_deepspeed: true       # 启用DeepSpeed，降级到ZeRO-2
+  zero_stage: 2             # 从ZeRO-3降级到ZeRO-2解决AllGather死锁
+  offload_optimizer: false  # 🔧 关闭offload解决backward卡顿问题
+  offload_params: false     # ZeRO-2不支持参数offload
+  
+  # 编译优化
+  compile_model: false      # PyTorch 2.0 compile
+
+# 替代配置选项说明：
+# 
+# 1. 超低参数版本 (~7B参数)：
+#    hidden_size: 2048
+#    num_layers: 24
+#    srte_factorized_rank: 64
+#
+# 2. SinCos版本 (SRTE接近0参数)：
+#    srte_encoding: "sincos"
+#    srte_share_across_layers: true
+#    srte_factorized_rank: 0
+#
+# 3. 高性能版本 (保持hidden_size=4096)：
+#    max_position_embeddings: 65536
+#    srte_factorized_rank: 256 
