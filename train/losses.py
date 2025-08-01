@@ -5,8 +5,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
+
 from typing import Dict, Any, Optional
 
+logger = logging.getLogger(__name__)
 
 class HybridModelLoss(nn.Module):
     """
@@ -32,6 +35,9 @@ class HybridModelLoss(nn.Module):
         self.gate_margin = gate_margin
         
         self.lm_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+        
+        # Debug计数器
+        self.debug_step = 0
         
     def forward(
         self,
@@ -66,6 +72,20 @@ class HybridModelLoss(nn.Module):
         
         total_loss = lm_loss
         
+        # 🔍 Debug: 检查gate_stats
+        self.debug_step += 1
+        if self.debug_step <= 10 or self.debug_step % 50 == 0:
+            if gate_stats is None:
+                logger.warning(f"Step {self.debug_step}: gate_stats is None!")
+            else:
+                logger.info(f"Step {self.debug_step}: Received gate_stats with {len(gate_stats)} layers")
+                for i, stats in enumerate(gate_stats):
+                    if 'gate_weights' in stats:
+                        gate_weights = stats['gate_weights']
+                        logger.info(f"  Layer {i}: gate_weights shape={gate_weights.shape}, mean={gate_weights.mean().item():.4f}, std={gate_weights.std().item():.4f}")
+                    else:
+                        logger.warning(f"  Layer {i}: No 'gate_weights' in stats!")
+        
         # 负载均衡和熵正则化损失
         if gate_stats:
             lb_loss = torch.tensor(0.0, device=logits.device)
@@ -73,15 +93,31 @@ class HybridModelLoss(nn.Module):
             
             for stats in gate_stats:
                 if 'gate_weights' in stats:
-                    gate_weights = stats['gate_weights']
-                    lb_loss += self._load_balance_loss(gate_weights)
-                    entropy_loss += self._entropy_regularization(gate_weights)
+                    gate_weights = stats['gate_weights'].float()  # dtype安全：bf16→fp32
+                    layer_lb_loss = self._load_balance_loss(gate_weights)
+                    layer_entropy_loss = self._entropy_regularization(gate_weights)
+                    
+                    lb_loss += layer_lb_loss
+                    entropy_loss += layer_entropy_loss
+                    
+                    # 🔍 Debug: 记录每层的损失
+                    if self.debug_step <= 10 or self.debug_step % 50 == 0:
+                        logger.info(f"    Layer LB loss: {layer_lb_loss.item():.6f}, Entropy loss: {layer_entropy_loss.item():.6f}")
             
             losses['load_balance_loss'] = lb_loss
             losses['entropy_loss'] = entropy_loss
             
             total_loss += self.load_balance_coeff * lb_loss
             total_loss += self.entropy_reg_coeff * entropy_loss
+            
+            # 🔍 Debug: 记录总的损失
+            if self.debug_step <= 10 or self.debug_step % 50 == 0:
+                logger.info(f"  Total LB loss: {lb_loss.item():.6f} (coeff: {self.load_balance_coeff})")
+                logger.info(f"  Total Entropy loss: {entropy_loss.item():.6f} (coeff: {self.entropy_reg_coeff})")
+        else:
+            # 当没有gate_stats时，设置为0
+            losses['load_balance_loss'] = torch.tensor(0.0, device=logits.device)
+            losses['entropy_loss'] = torch.tensor(0.0, device=logits.device)
         
         # 蒸馏损失
         if teacher_logits is not None and self.distill_coeff > 0:
@@ -98,8 +134,8 @@ class HybridModelLoss(nn.Module):
     def _load_balance_loss(self, gate_weights: torch.Tensor) -> torch.Tensor:
         """负载均衡损失"""
         mean_gate = gate_weights.mean()
-        lower_bound = self.gate_target - self.gate_margin
-        upper_bound = self.gate_target + self.gate_margin
+        lower_bound = self.gate_target - self.gate_margin  # 0.4
+        upper_bound = self.gate_target + self.gate_margin  # 0.6
         
         loss = (F.relu(lower_bound - mean_gate) + 
                 F.relu(mean_gate - upper_bound))

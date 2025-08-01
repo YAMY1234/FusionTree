@@ -8,9 +8,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, Any, Tuple
 import math
+from torch.utils.checkpoint import checkpoint
 
 from .mamba_block import MambaBlock
 from .local_global_attn import LocalGlobalAttention
+
+def _assert_finite(name, x):
+    """早期哨兵断言，方便定位 NaN/Inf 问题"""
+    if not torch.isfinite(x).all():
+        bad = (~torch.isfinite(x)).float().mean().item()
+        raise RuntimeError(f"[NaN/Inf] {name}: ratio={bad:.6f}, shape={tuple(x.shape)}")
 
 
 class SRTE(nn.Module):
@@ -152,7 +159,9 @@ class HybridBlock(nn.Module):
         srte_max_len: int = 65536,
         srte_shared=None,
         srte_factorized_rank: int = 0,
-        use_alignment: bool = True
+        use_alignment: bool = True,
+        shared_rope=None,
+        gradient_checkpointing: bool = False
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -160,6 +169,7 @@ class HybridBlock(nn.Module):
         self.global_heads = global_heads
         self.drop_branch_prob = drop_branch_prob
         self.use_alignment = use_alignment
+        self.gradient_checkpointing = gradient_checkpointing
         
         # 层归一化
         self.ln_input = nn.LayerNorm(hidden_size)
@@ -170,7 +180,8 @@ class HybridBlock(nn.Module):
             hidden_size,
             num_heads=num_heads,
             window_size=window_size, 
-            global_heads=global_heads
+            global_heads=global_heads,
+            rope=shared_rope
         )
         
         # 统一时间编码
@@ -194,16 +205,18 @@ class HybridBlock(nn.Module):
         self.gate = GateLowRank(hidden_size, rank=gate_rank)
         self.fusion_proj = nn.Linear(hidden_size, hidden_size)
         
-        # 小型MLP
+        # 小型MLP - 使用2H而不是4H减少内存使用
         self.small_mlp = nn.Sequential(
-            nn.Linear(hidden_size, 4 * hidden_size),
+            nn.Linear(hidden_size, 2 * hidden_size),
             nn.GELU(),
-            nn.Linear(4 * hidden_size, hidden_size),
+            nn.Linear(2 * hidden_size, hidden_size),
             nn.Dropout(0.1)
         )
         
         # 输出层归一化
         self.ln_output = nn.LayerNorm(hidden_size)
+        
+
         
     def forward(
         self,
@@ -234,6 +247,12 @@ class HybridBlock(nn.Module):
         
         # 输入层归一化
         normalized_input = self.ln_input(hidden_states)
+        if attention_mask is not None:
+            normalized_input = normalized_input * attention_mask[:, :, None].to(normalized_input.dtype)
+        
+        # 🔍 早期哨兵检查
+        _assert_finite("embeddings", hidden_states)
+        _assert_finite("normalized_input", normalized_input)
         
         # 获取统一时间编码
         time_encoding = self.srte(seq_len).to(hidden_states.dtype)  # [1, L, H]
@@ -242,14 +261,33 @@ class HybridBlock(nn.Module):
         mamba_input = normalized_input + time_encoding
         attn_input = normalized_input  # Attention分支使用RoPE，不加SRTE
         
-        # 并行计算两分支
-        h_mamba, new_mamba_state = self.mamba(mamba_input, state=mamba_state)
-        h_attn, new_kv_cache = self.attention(
-            attn_input, 
-            attention_mask=attention_mask, 
-            kv_cache=kv_cache,
-            use_cache=use_cache
-        )
+        # 并行计算两分支，使用选择性梯度检查点
+        if self.gradient_checkpointing and training and torch.is_grad_enabled():
+            # 对Mamba分支使用梯度检查点（只checkpoint输出，state不参与）
+            def mamba_forward(x):
+                return self.mamba(x, state=mamba_state)[0]  # 只返回输出
+            
+            h_mamba = checkpoint(mamba_forward, mamba_input, use_reentrant=False)
+            # state在训练时通常不需要，推理时会走else分支
+            new_mamba_state = None
+            
+            # 对Attention分支使用梯度检查点（只checkpoint输出，cache不参与）
+            def attn_forward(x):
+                return self.attention(x, attention_mask=attention_mask, 
+                                    kv_cache=kv_cache, use_cache=False)[0]  # 只返回输出
+            
+            h_attn = checkpoint(attn_forward, attn_input, use_reentrant=False)
+            # cache在训练时通常不需要，推理时会走else分支
+            new_kv_cache = None
+        else:
+            # 正常计算（推理模式或不使用checkpoint）
+            h_mamba, new_mamba_state = self.mamba(mamba_input, state=mamba_state)
+            h_attn, new_kv_cache = self.attention(
+                attn_input, 
+                attention_mask=attention_mask, 
+                kv_cache=kv_cache,
+                use_cache=use_cache
+            )
         
         # BranchDropout正则化（仅训练时）- 确保分布式训练时所有rank一致
         if training and self.drop_branch_prob > 0:
@@ -284,14 +322,21 @@ class HybridBlock(nn.Module):
                 else:
                     h_attn = torch.zeros_like(h_attn)
         
+        # 🔍 哨兵检查分支输出
+        _assert_finite("mamba_out", h_mamba)
+        _assert_finite("attn_out", h_attn)
+        
         # 特征对齐
         if self.use_alignment:
             aligned_features = self.alignment(h_mamba, h_attn)
         else:
             aligned_features = (h_mamba + h_attn) / 2
         
+        _assert_finite("aligned", aligned_features)
+        
         # 门控融合
         gate_weights = self.gate(aligned_features)  # [B, L, H]
+        _assert_finite("gate", gate_weights)
         fused_features = gate_weights * h_mamba + (1 - gate_weights) * h_attn
         
         # 投影和小型MLP
@@ -306,7 +351,7 @@ class HybridBlock(nn.Module):
         auxiliary_outputs = None
         if collect_gate_stats:
             auxiliary_outputs = {
-                'gate_weights': gate_weights.detach(),
+                'gate_weights': gate_weights,  # 保留梯度，不要detach
                 'gate_mean': gate_weights.mean().item(),
                 'gate_std': gate_weights.std().item(),
                 'mamba_norm': h_mamba.norm().item(),

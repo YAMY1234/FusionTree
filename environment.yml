@@ -1,5 +1,5 @@
-# environment-gpu.yml
-name: fusiontree-gpu
+# environment.yml
+name: fusiontree
 channels:
   - pytorch
   - nvidia

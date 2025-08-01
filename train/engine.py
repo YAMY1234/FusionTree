@@ -70,6 +70,14 @@ class TrainingEngine:
         self._init_loss()
         self._init_monitor()
         
+        # 启用SDPA优化
+        if torch.cuda.is_available():
+            torch.backends.cuda.enable_flash_sdp(True)          # 优先 FlashAttention2
+            torch.backends.cuda.enable_mem_efficient_sdp(True)  # 其次 mem-eff
+            torch.backends.cuda.enable_math_sdp(False)          # 尽量不要回落到 math
+            if self.rank == 0:
+                logger.info("Enabled SDPA optimizations (FlashAttention2 preferred)")
+        
         # 初始化wandb
         if self.config['logging']['wandb']['enabled'] and self.rank == 0:
             wandb.init(
@@ -95,7 +103,10 @@ class TrainingEngine:
         
     def _init_model(self):
         """初始化模型"""
-        model_config = HybridLanguageModelConfig(**self.config['model'])
+        # 合并模型配置和训练配置中的梯度检查点设置
+        model_config_dict = self.config['model'].copy()
+        model_config_dict['gradient_checkpointing'] = self.config['training'].get('gradient_checkpointing', False)
+        model_config = HybridLanguageModelConfig(**model_config_dict)
         
         # 检查是否使用DeepSpeed
         if DEEPSPEED_AVAILABLE and self.config['system'].get('use_deepspeed', True):
@@ -145,11 +156,12 @@ class TrainingEngine:
             self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
             self.tokenizer.pad_token = self.tokenizer.eos_token
             
-            # 设置model_max_length以避免长度警告，使用我们模型的window_size
-            model_config = self.config.get('model', {})
-            model_max_length = model_config.get('window_size', 1024)
-            self.tokenizer.model_max_length = model_max_length
-            logger.info(f"Set tokenizer max_length to {model_max_length}")
+            # 设置model_max_length与实际训练长度对齐
+            t_cfg = self.config.get('training', {})
+            m_cfg = self.config.get('model', {})
+            tk_max = max(t_cfg.get('max_seq_length', 1024), m_cfg.get('window_size', 1024))
+            self.tokenizer.model_max_length = tk_max
+            logger.info(f"Set tokenizer max_length to {tk_max}")
             
         except:
             # 如果加载失败，创建一个简单的占位符
@@ -193,9 +205,11 @@ class TrainingEngine:
             else:
                 curriculum_schedule = self.config['curriculum']['custom_schedule']
         
-        # 使用模型的window_size作为最大序列长度，确保与模型配置一致
-        max_seq_length = model_config.get('window_size', 1024)
-        logger.info(f"Setting data max_length to {max_seq_length} (from model.window_size)")
+        # 优先使用training.max_seq_length，其次才回落到model.window_size
+        max_seq_length = training_config.get('max_seq_length',
+                                             model_config.get('window_size', 1024))
+        logger.info(f"Setting data max_length to {max_seq_length} "
+                   f"(from training.max_seq_length if set, else model.window_size)")
         
         # 创建训练数据加载器
         logger.info(f"[DEBUG] Creating train dataloader with:")
@@ -356,7 +370,7 @@ class TrainingEngine:
                 "stage3_param_persistence_threshold": "auto", 
                 "stage3_max_live_parameters": 1e9,
                 "stage3_max_reuse_distance": 1e9,
-                "gather_16bit_weights_on_model_save": True
+                "gather_16bit_weights_on_model_save": False  # 🔧 关闭保存时权重聚合避免NCCL超时
             })
             
         # 配置offload（注意ZeRO-2不支持参数offload）
@@ -458,6 +472,21 @@ class TrainingEngine:
             print(f"  ✅ [DEBUG] Step {step}: Forward pass completed!")
             print(f"  📉 [DEBUG] Step {step}: Computing loss...")
         
+        # 🔍 NaN检测 - 检查模型输出
+        if torch.isnan(outputs['logits']).any():
+            print(f"❌ [ERROR] Step {step}: NaN detected in logits!")
+            print(f"  Logits shape: {outputs['logits'].shape}")
+            print(f"  Logits range: [{outputs['logits'].min():.6f}, {outputs['logits'].max():.6f}]")
+        
+        if outputs.get('gate_stats'):
+            for i, stats in enumerate(outputs['gate_stats']):
+                if 'gate_weights' in stats:
+                    gate_weights = stats['gate_weights']
+                    if torch.isnan(gate_weights).any():
+                        print(f"❌ [ERROR] Step {step}: NaN detected in gate_weights layer {i}!")
+                        print(f"  Gate weights shape: {gate_weights.shape}")
+                        print(f"  Gate weights range: [{gate_weights.min():.6f}, {gate_weights.max():.6f}]")
+        
         # 计算损失
         loss_dict = self.loss_fn(
             logits=outputs['logits'],
@@ -466,6 +495,15 @@ class TrainingEngine:
         )
         
         loss = loss_dict['total_loss']
+        
+        # 🔍 NaN检测 - 检查损失
+        if torch.isnan(loss):
+            print(f"❌ [ERROR] Step {step}: NaN detected in total loss!")
+            for k, v in loss_dict.items():
+                if torch.is_tensor(v) and torch.isnan(v):
+                    print(f"  NaN in {k}: {v}")
+            # 紧急停止训练避免浪费资源
+            raise ValueError(f"NaN loss detected at step {step}!")
         
         if self.rank == 0 and step <= 5:
             print(f"  🔙 [DEBUG] Step {step}: Starting backward pass...")
@@ -692,31 +730,74 @@ class TrainingEngine:
             logger.info("Training completed!")
     
     def _save_checkpoint(self, step: int, is_final: bool = False):
-        """保存检查点"""
+        """保存检查点 - 修复DeepSpeed版本兼容性问题"""
+        import time
+        
         output_dir = self.config['logging']['output_dir']
         os.makedirs(output_dir, exist_ok=True)
         
         use_deepspeed = self.config['system'].get('use_deepspeed', False)
         
         if use_deepspeed:
-            # ✅ DeepSpeed保存方式 - 所有rank都必须调用save_checkpoint
+            # 🚀 修复DeepSpeed API兼容性
             tag = "final" if is_final else f"step_{step}"
             
+            # ✅ 第1步：保存前对齐所有rank的步数（防止步数不一致）
+            if dist.is_initialized():
+                dist.barrier()  # 确保所有rank在同一步数
+                
             if self.rank == 0:
-                logger.info(f"Saving DeepSpeed checkpoint: {tag}")
+                logger.info(f"🔄 Saving DeepSpeed checkpoint: {tag}")
             
-            # 🔧 关键：所有rank都必须调用这个函数（内部有barrier）
-            self.model.save_checkpoint(output_dir, tag=tag)
+            # ✅ 第2步：计时开始
+            t0 = time.time()
+            
+            # 🔧 关键修复：使用新版DeepSpeed API，只让rank 0执行实际保存
+            try:
+                if self.rank == 0:
+                    # 只有rank 0真正执行保存操作
+                    client_state = {
+                        'step': step,
+                        'config': self.config
+                    }
+                    self.model.save_checkpoint(
+                        output_dir, 
+                        tag=tag,
+                        client_state=client_state,
+                        async_save=True  # 🚀 修复：async_io -> async_save (DeepSpeed 0.13+)
+                    )
+                
+                # 所有rank都必须执行barrier确保同步
+                if dist.is_initialized():
+                    dist.barrier()
+                    
+            except Exception as e:
+                # 🚀 关键修复：出错时立即销毁进程组，防止其他rank阻塞
+                if self.rank == 0:
+                    logger.error(f"❌ DeepSpeed save_checkpoint failed: {e}")
+                
+                # 销毁进程组并退出，防止NCCL超时
+                if dist.is_initialized():
+                    try:
+                        dist.destroy_process_group()
+                    except:
+                        pass
+                sys.exit(1)
+            
+            save_time = time.time() - t0
             
             # 🔧 只有rank0保存额外的配置文件，避免文件冲突
             if self.rank == 0:
-                config_path = os.path.join(output_dir, tag, "config.json")
-                with open(config_path, 'w') as f:
-                    json.dump(self.config, f, indent=2)
-                logger.info(f"✅ DeepSpeed checkpoint saved: {output_dir}/{tag}")
+                try:
+                    config_path = os.path.join(output_dir, tag, "config.json")
+                    with open(config_path, 'w') as f:
+                        json.dump(self.config, f, indent=2)
+                    logger.info(f"✅ DeepSpeed checkpoint saved in {save_time:.1f}s: {output_dir}/{tag}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to save config.json: {e}")
                 
         else:
-            # ✅ PyTorch原生保存方式
+            # ✅ PyTorch原生保存方式（保持不变）
             # 获取模型状态（处理DDP包装）
             model_state = self.model.module.state_dict() if self.distributed else self.model.state_dict()
             
@@ -736,8 +817,12 @@ class TrainingEngine:
             else:
                 save_path = os.path.join(output_dir, f'checkpoint_step_{step}.pt')
             
-            logger.info(f"Saving PyTorch checkpoint: {save_path}")
-            torch.save(checkpoint, save_path)
+            if self.rank == 0:  # PyTorch模式只在rank0保存
+                logger.info(f"🔄 Saving PyTorch checkpoint: {save_path}")
+                t0 = time.time()
+                torch.save(checkpoint, save_path)
+                save_time = time.time() - t0
+                logger.info(f"✅ PyTorch checkpoint saved in {save_time:.1f}s")
         
         # 🔧 保存最佳模型链接（只在非DeepSpeed模式或rank0）
         if use_deepspeed:
@@ -747,25 +832,29 @@ class TrainingEngine:
             
             # 只有rank0创建最佳模型链接，避免冲突
             if self.rank == 0:
-                best_path = os.path.join(output_dir, 'best_model')
-                if not os.path.exists(best_path) or is_final:
-                    if os.path.exists(best_path):
-                        os.remove(best_path) 
-                    os.symlink(tag, best_path)  # 链接到checkpoint目录
+                try:
+                    best_path = os.path.join(output_dir, 'best_model')
+                    if not os.path.exists(best_path) or is_final:
+                        if os.path.exists(best_path):
+                            os.remove(best_path) 
+                        os.symlink(tag, best_path)  # 链接到checkpoint目录
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to create best_model symlink: {e}")
         else:
             # PyTorch模式：正常创建链接
-            best_path = os.path.join(output_dir, 'best_model.pt')
-            if not os.path.exists(best_path) or is_final:
-                if os.path.exists(best_path):
-                    os.remove(best_path)
-                os.symlink(os.path.basename(save_path), best_path)
+            if self.rank == 0:
+                try:
+                    best_path = os.path.join(output_dir, 'best_model.pt')
+                    if not os.path.exists(best_path) or is_final:
+                        if os.path.exists(best_path):
+                            os.remove(best_path)
+                        os.symlink(os.path.basename(save_path), best_path)
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to create best_model symlink: {e}")
             
         # 只在rank0记录保存完成日志
-        if self.rank == 0:
-            if use_deepspeed:
-                logger.info(f"✅ DeepSpeed checkpoint and links created: {save_path}")
-            else:
-                logger.info(f"✅ PyTorch checkpoint saved: {save_path}")
+        if self.rank == 0 and not use_deepspeed:  # DeepSpeed已经在上面记录了
+            logger.info("✅ Checkpoint save completed")
 
 
 def main():

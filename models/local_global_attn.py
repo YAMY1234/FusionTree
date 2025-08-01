@@ -13,27 +13,38 @@ import math
 class RotaryPositionalEmbedding(nn.Module):
     """旋转位置编码（RoPE）"""
     
-    def __init__(self, dim: int, max_seq_len: int = 65536, base: float = 10000.0):
+    def __init__(self, dim: int, max_seq_len: int = 16384, base: float = 10000.0, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.dim = dim
-        self.max_seq_len = max_seq_len
         self.base = base
+        self.dtype = dtype
         
         # 预计算频率
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         
-        # 预计算位置编码缓存
-        self._init_cos_sin_cache(max_seq_len)
+        # 初始化空的缓存状态
+        self.max_seq_len = 0
+        self._build_cache(1, dtype, device='cpu')  # 延迟到第一次forward搬到GPU
         
-    def _init_cos_sin_cache(self, max_seq_len: int):
-        """初始化cos/sin缓存"""
-        seq = torch.arange(max_seq_len, dtype=torch.float)
-        freqs = torch.einsum('i,j->ij', seq, self.inv_freq)
+    def _build_cache(self, seqlen: int, dtype: torch.dtype, device: torch.device):
+        """按需构建缓存"""
+        if (seqlen <= self.max_seq_len and 
+            getattr(self, 'cos_cached', None) is not None and
+            self.cos_cached.dtype == dtype and 
+            self.cos_cached.device == device):
+            return
+            
+        # 扩容策略：至少128，或者翻倍当前大小
+        seqlen = max(seqlen, 128 if self.max_seq_len == 0 else self.max_seq_len * 2)
+        
+        t = torch.arange(seqlen, dtype=dtype, device=device)
+        freqs = torch.einsum('i,j->ij', t, self.inv_freq.to(dtype).to(device))
         emb = torch.cat((freqs, freqs), dim=-1)
         
-        self.register_buffer('cos_cached', emb.cos()[None, None, :, :])
-        self.register_buffer('sin_cached', emb.sin()[None, None, :, :])
+        self.register_buffer('cos_cached', emb.cos()[None, None, :, :], persistent=False)
+        self.register_buffer('sin_cached', emb.sin()[None, None, :, :], persistent=False)
+        self.max_seq_len = seqlen
         
     def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
         """旋转输入张量的一半维度"""
@@ -53,6 +64,10 @@ class RotaryPositionalEmbedding(nn.Module):
         Returns:
             旋转后的q和k
         """
+        # 按需构建缓存
+        max_pos = max(q_pos.max().item() + 1, k_pos.max().item() + 1)
+        self._build_cache(max_pos, q.dtype, q.device)
+        
         cos_q, sin_q = self._cos_sin_at(q_pos)  # [1, 1, L_q, D]
         cos_k, sin_k = self._cos_sin_at(k_pos)  # [1, 1, L_k, D]
         
@@ -93,12 +108,8 @@ class SlidingWindowAttention(nn.Module):
         """
         batch_size, num_heads, seq_len, head_dim = q.shape
         
-        # 使用块化计算避免O(L²)内存开销
-        if seq_len > 2048:  # 对长序列使用块化计算
-            return self._blockwise_attention(q, k, v, attention_mask)
-        else:
-            # 短序列仍使用原始方法
-            return self._standard_attention(q, k, v, attention_mask)
+        # 强制使用块化计算避免O(L²)内存开销
+        return self._blockwise_attention(q, k, v, attention_mask)
     
     def _blockwise_attention(
         self, 
@@ -107,7 +118,7 @@ class SlidingWindowAttention(nn.Module):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """块化滑窗注意力计算"""
+        """块化滑窗注意力计算，使用SDPA优化"""
         batch_size, num_heads, seq_len, head_dim = q.shape
         block_size = min(self.window_size, 1024)  # 块大小
         
@@ -117,7 +128,7 @@ class SlidingWindowAttention(nn.Module):
             end_idx = min(start_idx + block_size, seq_len)
             
             # 当前块的查询
-            q_block = q[:, :, start_idx:end_idx, :]
+            q_block = q[:, :, start_idx:end_idx, :]  # [B,H,Lq,D]
             
             # 计算有效的键值范围（滑窗内）
             k_start = max(0, start_idx - self.window_size // 2)
@@ -127,28 +138,24 @@ class SlidingWindowAttention(nn.Module):
             if self.causal:
                 k_end = min(k_end, end_idx)
             
-            k_block = k[:, :, k_start:k_end, :]
+            k_block = k[:, :, k_start:k_end, :]  # [B,H,K,D]
             v_block = v[:, :, k_start:k_end, :]
             
-            # 计算注意力
-            scores = torch.matmul(q_block, k_block.transpose(-2, -1)) / math.sqrt(head_dim)
-            
-            # 应用因果掩码
-            if self.causal:
-                # 构建局部因果掩码
-                q_indices = torch.arange(start_idx, end_idx, device=q.device).unsqueeze(1)
-                k_indices = torch.arange(k_start, k_end, device=k.device).unsqueeze(0)
-                causal_mask = q_indices >= k_indices
-                scores = scores.masked_fill(~causal_mask, float('-inf'))
-            
-            # 应用attention_mask
+            # —— 关键改动：同样采用"零化 K/V + 零化 pad 查询 + 输出乘回查询掩码" ——
             if attention_mask is not None:
-                mask_block = attention_mask[:, k_start:k_end].unsqueeze(1).unsqueeze(1)
-                scores = scores.masked_fill(~mask_block, float('-inf'))
-            
-            # Softmax和输出
-            attn_weights = F.softmax(scores, dim=-1)
-            output[:, :, start_idx:end_idx, :] = torch.matmul(attn_weights, v_block)
+                q_mask_blk = attention_mask[:, None, start_idx:end_idx, None].to(q_block.dtype)  # [B,1,Lq,1]
+                kv_mask_blk = attention_mask[:, None, k_start:k_end, None].to(k_block.dtype)    # [B,1,K,1] 修复维度
+                q_block = q_block * q_mask_blk
+                k_block = k_block * kv_mask_blk
+                v_block = v_block * kv_mask_blk
+
+            output_block = F.scaled_dot_product_attention(
+                q_block, k_block, v_block, attn_mask=None, is_causal=self.causal
+            )
+            output_block = torch.nan_to_num(output_block, nan=0.0, posinf=0.0, neginf=0.0)
+            if attention_mask is not None:
+                output_block = output_block * q_mask_blk
+            output[:, :, start_idx:end_idx, :] = output_block
         
         return output
     
@@ -208,7 +215,7 @@ class SlidingWindowAttention(nn.Module):
 
 
 class GlobalAttention(nn.Module):
-    """全局注意力：关注整个序列"""
+    """全局注意力：关注整个序列，使用SDPA优化"""
     
     def forward(
         self,
@@ -218,33 +225,28 @@ class GlobalAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        标准的全局注意力计算
+        使用SDPA的全局注意力计算
         
         Args:
             q, k, v: [B, H, L, D]
-            attention_mask: [B, L] 或 None
+            attention_mask: [B, L] 布尔掩码，True表示有效位置
             
         Returns:
             output: [B, H, L, D]
         """
-        batch_size, num_heads, seq_len, head_dim = q.shape
-        
-        # 计算注意力分数
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
-        
-        # 应用因果掩码
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=q.device), diagonal=1).bool()
-        scores = scores.masked_fill(causal_mask, float('-inf'))
-        
-        # 应用attention_mask
+        # —— 关键改动：用"零化"而非布尔 mask，避免 all-masked 触发 NaN ——
         if attention_mask is not None:
-            expanded_mask = attention_mask[:, None, None, :].expand(batch_size, 1, seq_len, seq_len)
-            scores = scores.masked_fill(~expanded_mask, float('-inf'))
-        
-        # Softmax和输出
-        attn_weights = F.softmax(scores, dim=-1)
-        output = torch.matmul(attn_weights, v)
-        
+            q_mask = attention_mask[:, None, :, None].to(q.dtype)  # [B,1,L,1] 查询位置
+            kv_mask = attention_mask[:, None, :, None].to(k.dtype) # [B,1,L,1] 键值位置（修复维度）
+            q = q * q_mask
+            k = k * kv_mask
+            v = v * kv_mask
+
+        output = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
+        # 额外稳健性：把任何潜在 NaN 归零（理论上不会再出现）
+        output = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
+        if attention_mask is not None:
+            output = output * q_mask  # 保证 pad 查询位的输出仍为 0
         return output
 
 
@@ -263,7 +265,8 @@ class LocalGlobalAttention(nn.Module):
         global_heads: int = 2,
         head_dim: Optional[int] = None,
         dropout: float = 0.1,
-        use_rope: bool = True
+        use_rope: bool = True,
+        rope: Optional[RotaryPositionalEmbedding] = None
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -290,7 +293,12 @@ class LocalGlobalAttention(nn.Module):
         
         # 位置编码
         if use_rope:
-            self.rope = RotaryPositionalEmbedding(head_dim)
+            if rope is not None:
+                # 使用共享的RoPE实例
+                self.rope = rope
+            else:
+                # 创建新的RoPE实例
+                self.rope = RotaryPositionalEmbedding(head_dim, dtype=torch.bfloat16)
         else:
             self.rope = None
             

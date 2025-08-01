@@ -2,15 +2,15 @@
 # 使用真实Wikipedia数据进行预训练
 
 training:
-  max_steps: 1000        # 增加训练步数以充分利用真实数据
-  warmup_steps: 100      # 相应增加warmup步数
+  max_steps: 5000        # 增加训练步数以充分利用真实数据
+  warmup_steps: 200      # 4% 热身，更稳定
   learning_rate: 0.0001  # 1e-4
-  batch_size: 2          # 🚀 优化: 保持为2充分利用显存
-  gradient_accumulation_steps: 4   # 🚀 优化: 恢复为4提升训练效果
+  batch_size: 4          # ↑ 每卡 micro-batch 提高至4
+  gradient_accumulation_steps: 2   # ↓ 累积梯度步数降至2，保持总batch tokens不变
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
-  eps: 0.00000001  # 1e-8
+  eps: 0.000001  # 1e-6 更稳定的数值设置
   
   # 学习率调度
   lr_scheduler: "cosine"
@@ -24,20 +24,20 @@ training:
   fp16: false
   bf16: true
   
-  # 正则化系数
-  load_balance_coeff: 0.1
-  entropy_reg_coeff: 0.0001  # 1e-4
+  # 正则化系数 - 修复detach后的建议值
+  load_balance_coeff: 0.05
+  entropy_reg_coeff: 0.0003  # 3e-4 更强的熵正则
   distill_coeff: 0.0  # 设为 > 0 启用蒸馏
   distill_temperature: 4.0
   
   # 数据相关
   max_seq_length: 1024  # 🚀 优化: 恢复1024序列长度
   
-  # 保存和评估
-  save_steps: 500       # 更频繁保存checkpoint
-  eval_steps: 500
-  logging_steps: 50     # 更频繁的日志输出
-  save_total_limit: 2
+  # 保存和评估 - 🚀 优化：降低保存频率防止NCCL超时
+  save_steps: 1000      # ↑ 从500提高到1000，减少I/O阻塞
+  eval_steps: 1000      # ↑ 对应提高评估频率
+  logging_steps: 50     # 保持频繁的日志输出
+  save_total_limit: 3   # ↑ 增加到3个，避免过于频繁的清理
 
 model:
   # 🚀 优化后的中型模型配置 - 平衡性能与显存
@@ -45,10 +45,10 @@ model:
   hidden_size: 1536          # 🔧 优化: 768→1536 充分利用显存
   num_layers: 18             # 🔧 优化: 12→18 增加模型深度
   num_heads: 12              # 🔧 保持12个头适配1536维度
-  window_size: 1024          # 🔧 优化: 512→1024 恢复完整序列长度
+  window_size: 256           # 🔧 内存优化: 1024→256 减少局部注意力内存使用
   global_heads: 2
   gate_rank: 96              # 🔧 优化: 64→96 适度增加gate复杂度            
-  max_position_embeddings: 32768  
+  max_position_embeddings: 8192   # 🔧 内存优化: 临时降低以减少RoPE缓存  
   
   # 关键优化：SRTE配置
   srte_encoding: "learnable"        
@@ -126,7 +126,7 @@ logging:
   log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   log_interval: 10          # 训练日志记录间隔（steps）
   save_interval: 200        # 模型保存间隔（steps）
-  output_dir: "checkpoints/wikipedia/" # 专门的Wikipedia训练checkpoint目录
+  output_dir: "/tmp/checkpoints/wikipedia/" # 🚀 优化：使用本地SSD避免网络I/O超时
   
   # Wandb配置 - 可选开启用于监控
   wandb:
@@ -141,7 +141,7 @@ gate_monitor:
   collect_detailed: false
   log_interval: 100
   save_interval: 1000
-  save_path: "checkpoints/wikipedia/gate_stats.json"
+  save_path: "/tmp/checkpoints/wikipedia/gate_stats.json"
   
   # 裁剪阈值
   mamba_threshold_high: 0.8
@@ -155,11 +155,11 @@ system:
   backend: "nccl"
   find_unused_parameters: false
   
-  # 内存优化
+  # 内存优化 - 使用ZeRO-2获得更好吞吐
   use_deepspeed: true       
-  zero_stage: 3              # 🔧 OOM修复: 2→3 启用参数分片
-  offload_optimizer: true   # ✅ 保持关闭避免backward卡顿  
-  offload_params: true       # 🔧 OOM修复: 启用参数offload到CPU     
+  zero_stage: 2              # ↓ 从ZeRO-3降级到ZeRO-2，更快的通信
+  offload_optimizer: false  # 🔧 关闭offload避免I/O瓶颈和NCCL超时 
+  offload_params: false     # ZeRO-2不支持参数offload     
   
   # 编译优化
   compile_model: false

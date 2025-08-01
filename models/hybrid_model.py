@@ -39,6 +39,7 @@ class HybridLanguageModelConfig:
         # 训练相关
         load_balance_coeff: float = 0.1,
         entropy_reg_coeff: float = 1e-4,
+        gradient_checkpointing: bool = False,
         # 推理相关
         use_cache: bool = True,
         pad_token_id: int = 0,
@@ -64,6 +65,7 @@ class HybridLanguageModelConfig:
         self.tie_word_embeddings = tie_word_embeddings
         self.load_balance_coeff = load_balance_coeff
         self.entropy_reg_coeff = entropy_reg_coeff
+        self.gradient_checkpointing = gradient_checkpointing
         self.use_cache = use_cache
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
@@ -114,6 +116,16 @@ class HybridLanguageModel(nn.Module):
             )
             print(f"Created shared SRTE for {config.num_layers} layers")
         
+        # 创建共享RoPE实例
+        from .local_global_attn import RotaryPositionalEmbedding
+        head_dim = config.hidden_size // config.num_heads
+        self.shared_rope = RotaryPositionalEmbedding(
+            head_dim, 
+            max_seq_len=config.max_position_embeddings, 
+            dtype=torch.bfloat16
+        )
+        print(f"Created shared RoPE for {config.num_layers} layers")
+        
         # 混合块堆叠
         self.layers = nn.ModuleList([
             HybridBlock(
@@ -127,7 +139,9 @@ class HybridLanguageModel(nn.Module):
                 srte_max_len=config.max_position_embeddings,
                 srte_shared=self.shared_srte,
                 srte_factorized_rank=config.srte_factorized_rank,
-                use_alignment=config.use_alignment
+                use_alignment=config.use_alignment,
+                shared_rope=self.shared_rope,
+                gradient_checkpointing=config.gradient_checkpointing
             )
             for i in range(config.num_layers)
         ])

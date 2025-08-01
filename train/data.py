@@ -345,7 +345,7 @@ class LengthCurriculumDataset(LongContextDataset):
         return False
 
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]], max_model_length: int = 1024) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: List[Dict[str, torch.Tensor]], max_model_length: int = 1024, pad_token_id: int = 50256) -> Dict[str, torch.Tensor]:
     """
     数据批处理函数
     处理不同长度的序列，进行padding
@@ -374,7 +374,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]], max_model_length: int = 102
         # 右padding
         pad_length = max_length - input_ids.size(0)
         if pad_length > 0:
-            input_ids = F.pad(input_ids, (0, pad_length), value=0)
+            input_ids = F.pad(input_ids, (0, pad_length), value=pad_token_id)
             attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
             labels = F.pad(labels, (0, pad_length), value=-100)  # -100会被ignore
         
@@ -456,7 +456,8 @@ def create_data_loader(
         'num_workers': num_workers,
         'pin_memory': pin_memory,
         'drop_last': True,  # 确保最后一个batch大小一致
-        'collate_fn': partial(collate_fn, max_model_length=max_length)
+        'collate_fn': partial(collate_fn, max_model_length=max_length,
+                              pad_token_id=(tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None else tokenizer.eos_token_id))
     }
     
     # 添加prefetch_factor（仅当num_workers > 0时）
